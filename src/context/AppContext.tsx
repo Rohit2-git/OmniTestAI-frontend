@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import type { Application, TestCase, ExecutionRun, KnowledgeAsset } from '../types';
-import { initialApplications, initialTestCases, initialExecutionHistory, initialKnowledgeAssets } from '../data/mockData';
+import { apiService } from '../services/api';
 
 interface AppContextType {
   applications: Application[];
@@ -18,77 +18,61 @@ interface AppContextType {
   addExecutionRun: (run: ExecutionRun) => void;
   addKnowledgeAsset: (asset: Omit<KnowledgeAsset, 'id' | 'createdAt'>) => KnowledgeAsset;
   deleteKnowledgeAsset: (id: string) => void;
+  // Persistent generation studio history cache
+  generationBatches: any[];
+  setGenerationBatches: React.Dispatch<React.SetStateAction<any[]>>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Load initial state from localStorage or mockData
   const [applications, setApplications] = useState<Application[]>(() => {
     const saved = localStorage.getItem('ai_agent_applications');
-    return saved ? JSON.parse(saved) : initialApplications;
+    return saved ? JSON.parse(saved) : []; 
   });
 
   const [testCases, setTestCases] = useState<TestCase[]>(() => {
     const saved = localStorage.getItem('ai_agent_testcases');
-    return saved ? JSON.parse(saved) : initialTestCases;
+    return saved ? JSON.parse(saved) : []; 
   });
 
   const [history, setHistory] = useState<ExecutionRun[]>(() => {
     const saved = localStorage.getItem('ai_agent_history');
-    return saved ? JSON.parse(saved) : initialExecutionHistory;
+    return saved ? JSON.parse(saved) : []; 
   });
 
   const [knowledgeAssets, setKnowledgeAssets] = useState<KnowledgeAsset[]>(() => {
     const saved = localStorage.getItem('ai_agent_knowledge_assets');
-    return saved ? JSON.parse(saved) : initialKnowledgeAssets;
+    return saved ? JSON.parse(saved) : []; 
   });
 
   const [activeAppId, setActiveAppId] = useState<string | null>(() => {
     const saved = localStorage.getItem('ai_agent_active_appid');
     if (saved) return saved;
-    const apps = localStorage.getItem('ai_agent_applications')
-      ? JSON.parse(localStorage.getItem('ai_agent_applications')!)
-      : initialApplications;
-    return apps.length > 0 ? apps[0].id : null;
+    return applications.length > 0 ? applications[0].id : null;
   });
 
-  // Sync state to localStorage on changes
-  useEffect(() => {
-    localStorage.setItem('ai_agent_applications', JSON.stringify(applications));
-  }, [applications]);
+  // FIXED & FULLY REPLACED: Generation cache initialized straight out of localStorage memory to survive reloads
+  const [generationBatches, setGenerationBatches] = useState<any[]>(() => {
+    const saved = localStorage.getItem('ai_agent_temp_batches');
+    return saved ? JSON.parse(saved) : [];
+  });
 
-  useEffect(() => {
-    localStorage.setItem('ai_agent_testcases', JSON.stringify(testCases));
-  }, [testCases]);
+  useEffect(() => { localStorage.setItem('ai_agent_applications', JSON.stringify(applications)); }, [applications]);
+  useEffect(() => { localStorage.setItem('ai_agent_testcases', JSON.stringify(testCases)); }, [testCases]);
+  useEffect(() => { localStorage.setItem('ai_agent_history', JSON.stringify(history)); }, [history]);
+  useEffect(() => { localStorage.setItem('ai_agent_knowledge_assets', JSON.stringify(knowledgeAssets)); }, [knowledgeAssets]);
+  useEffect(() => { if (activeAppId) localStorage.setItem('ai_agent_active_appid', activeAppId); }, [activeAppId]);
 
+  // NEW DYNAMIC EFFECT TRACKER: Synchronizes generation states into cache boundaries on every write mutation
   useEffect(() => {
-    localStorage.setItem('ai_agent_history', JSON.stringify(history));
-  }, [history]);
+    localStorage.setItem('ai_agent_temp_batches', JSON.stringify(generationBatches));
+  }, [generationBatches]);
 
-  useEffect(() => {
-    localStorage.setItem('ai_agent_knowledge_assets', JSON.stringify(knowledgeAssets));
-  }, [knowledgeAssets]);
-
-  useEffect(() => {
-    if (activeAppId) {
-      localStorage.setItem('ai_agent_active_appid', activeAppId);
-    } else {
-      localStorage.removeItem('ai_agent_active_appid');
-    }
-  }, [activeAppId]);
-
-  // App handlers
   const addApplication = (appData: Omit<Application, 'id' | 'createdAt'>) => {
-    const newApp: Application = {
-      ...appData,
-      id: `app-${Date.now()}`,
-      createdAt: new Date().toISOString()
-    };
+    const newApp: Application = { ...appData, id: `app-${Date.now()}`, createdAt: new Date().toISOString() };
     setApplications(prev => [newApp, ...prev]);
-    if (!activeAppId) {
-      setActiveAppId(newApp.id);
-    }
+    if (!activeAppId) setActiveAppId(newApp.id);
     return newApp;
   };
 
@@ -98,7 +82,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const deleteApplication = (id: string) => {
     setApplications(prev => prev.filter(app => app.id !== id));
-    // Clean up test cases and history belonging to this app
     setTestCases(prev => prev.filter(tc => tc.appId !== id));
     setHistory(prev => prev.filter(run => run.appId !== id));
     setKnowledgeAssets(prev => prev.filter(asset => asset.appId !== id));
@@ -108,14 +91,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  // Test Case handlers
   const addTestCase = (tcData: Omit<TestCase, 'id' | 'createdAt'>) => {
     const newTestCase: TestCase = {
       ...tcData,
-      id: `tc-${Date.now()}`,
+      id: `tc-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
       createdAt: new Date().toISOString()
     };
-    setTestCases(prev => [newTestCase, ...prev]);
+    setTestCases(prev => [...prev, newTestCase]);
     return newTestCase;
   };
 
@@ -123,49 +105,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setTestCases(prev => prev.map(tc => tc.id === updatedTestCase.id ? updatedTestCase : tc));
   };
 
-  const deleteTestCase = (id: string) => {
+  const deleteTestCase = async (id: string) => {
     setTestCases(prev => prev.filter(tc => tc.id !== id));
+    const numericId = parseInt(id.replace(/^\D+/g, ''), 10);
+    if (!isNaN(numericId)) {
+      try {
+        await apiService.deleteRunRecord(numericId);
+      } catch (err) {
+        console.error("Backend single sync delete execution failure context:", err);
+      }
+    }
   };
 
-  // Execution History handlers
-  const addExecutionRun = (run: ExecutionRun) => {
-    setHistory(prev => [run, ...prev]);
-  };
-
+  const addExecutionRun = (run: ExecutionRun) => { setHistory(prev => [run, ...prev]); };
   const addKnowledgeAsset = (assetData: Omit<KnowledgeAsset, 'id' | 'createdAt'>) => {
-    const newAsset: KnowledgeAsset = {
-      ...assetData,
-      id: `kb-${Date.now()}`,
-      createdAt: new Date().toISOString()
-    };
+    const newAsset: KnowledgeAsset = { ...assetData, id: `kb-${Date.now()}`, createdAt: new Date().toISOString() };
     setKnowledgeAssets(prev => [newAsset, ...prev]);
     return newAsset;
   };
-
-  const deleteKnowledgeAsset = (id: string) => {
-    setKnowledgeAssets(prev => prev.filter(asset => asset.id !== id));
-  };
+  const deleteKnowledgeAsset = (id: string) => { setKnowledgeAssets(prev => prev.filter(asset => asset.id !== id)); };
 
   return (
-    <AppContext.Provider
-      value={{
-        applications,
-        testCases,
-        history,
-        knowledgeAssets,
-        activeAppId,
-        setActiveAppId,
-        addApplication,
-        updateApplication,
-        deleteApplication,
-        addTestCase,
-        updateTestCase,
-        deleteTestCase,
-        addExecutionRun,
-        addKnowledgeAsset,
-        deleteKnowledgeAsset
-      }}
-    >
+    <AppContext.Provider value={{
+      applications, testCases, history, knowledgeAssets, activeAppId, setActiveAppId,
+      addApplication, updateApplication, deleteApplication, addTestCase, updateTestCase,
+      deleteTestCase, addExecutionRun, addKnowledgeAsset, deleteKnowledgeAsset,
+      generationBatches, setGenerationBatches
+    }}>
       {children}
     </AppContext.Provider>
   );
@@ -173,8 +139,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
 export const useApp = () => {
   const context = useContext(AppContext);
-  if (!context) {
-    throw new Error('useApp must be used within an AppProvider');
-  }
+  if (!context) throw new Error('useApp must be used within an AppProvider');
   return context;
 };
