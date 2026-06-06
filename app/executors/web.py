@@ -1,13 +1,11 @@
 """
 Web Executor — wraps playwright_executor.py.
 
-Single test  → headful browser (user watches live), no screenshots
-Suite run    → headless browser, captures screenshots for slideshow
+Single test  → headful browser (user watches live) + screenshots
+Suite run    → headless browser + screenshots for slideshow
 """
-import os
 from app.executors.base import BaseExecutor
 from app.schemas.test import TestRunRequest
-# pyrefly: ignore [missing-import]
 from app.executors.playwright import run_test_case
 
 
@@ -24,15 +22,13 @@ class WebExecutor(BaseExecutor):
     ) -> dict:
         """
         SINGLE TEST MODE — headful browser.
-        Browser opens visibly on user's screen.
-        No screenshots captured (user watches live).
-        Stops on first failure.
+        Browser opens visibly. Screenshots captured after each step.
         """
         return await run_test_case(
             test_case=test_case,
             base_url=base_url,
             headful=True,
-            capture_screenshots=False
+            capture_screenshots=True
         )
 
     async def execute_test_case_headless(
@@ -43,7 +39,6 @@ class WebExecutor(BaseExecutor):
         """
         SUITE MODE — headless browser.
         Captures screenshot after every step for slideshow.
-        Stops on first failure.
         """
         return await run_test_case(
             test_case=test_case,
