@@ -5,7 +5,6 @@ from fastapi import FastAPI   # type: ignore
 from fastapi.middleware.cors import CORSMiddleware  # type: ignore
 from app.database import db
 
-# Explicitly import each router module directly from its file path
 import app.routers.health as health
 import app.routers.tests as tests
 import app.routers.results as results
@@ -20,7 +19,6 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS Middleware Configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  
@@ -29,18 +27,14 @@ app.add_middleware(
     allow_headers=["*"],  
 )
 
-
 @app.on_event("startup")
 async def startup():
     await db.connect()
-
 
 @app.on_event("shutdown")
 async def shutdown():
     await db.disconnect()
 
-
-# Registering Routers directly with the application engine core
 app.include_router(health.router)
 app.include_router(tests.router)
 app.include_router(results.router)
