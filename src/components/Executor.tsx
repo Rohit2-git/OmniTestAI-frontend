@@ -1,219 +1,395 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
-import type { LogEntry} from '../types';
 import { 
-  Play,  
-  RotateCcw, 
-  Terminal as TerminalIcon, 
-  Globe
+  Play, Command, ListTodo, Trash2, CheckCircle2, 
+  XCircle, Image as ImageIcon, Terminal as TerminalIcon, Maximize2, Loader2, Layers
 } from 'lucide-react';
-import { apiService } from '../services/api'; // Imported live bridge client
+
+const API_BASE = 'http://localhost:8000';
 
 interface ExecutorProps {
   selectedTestIdsForRun: string[];
   clearSelectedTests: () => void;
+  addToQueue?: (ids: string[]) => void;
 }
 
-interface SimActionStep {
-  log: string;
-  logType: 'info' | 'step' | 'success' | 'warning' | 'error';
-  browserState: string;
-  highlightSelector?: string;
-  highlightText?: string;
-  value?: string;
-  duration?: number;
-}
 
-export const Executor: React.FC<ExecutorProps> = ({ 
-  selectedTestIdsForRun, 
-}) => {
-  const { applications, testCases, activeAppId } = useApp();
+// RESULTS_KEY is app-scoped — defined inside component
+
+export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clearSelectedTests }) => {
+  const { applications, testCases, activeAppId, addExecutionRun } = useApp();
   const [nlCommand, setNlCommand] = useState('');
-  
-  const [isSimulating, setIsSimulating] = useState(false);
-  const [simSpeed] = useState<number>(1);
-  const [simLogs, setSimLogs] = useState<LogEntry[]>([]);
-  
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [processingId, setProcessingId] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
+  const toggleSection = (section: string) => setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
+  const [lightboxImg, setLightboxImg] = useState<string | null>(null);
+
+  const stagedKey = `omnitest_staged_ids_${activeAppId || 'default'}`;
+  const [stagedIds, setStagedIds] = useState<string[]>(() => {
+    const key = `omnitest_staged_ids_${activeAppId || 'default'}`;
+    const saved = localStorage.getItem(key);
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  // Reload app-scoped staged queue and results when active app changes
+  useEffect(() => {
+    const savedStaged = localStorage.getItem(stagedKey);
+    setStagedIds(savedStaged ? JSON.parse(savedStaged) : []);
+    const savedResults = sessionStorage.getItem(`omnitest_exec_results_${activeAppId || 'default'}`);
+    setTestResults(savedResults ? JSON.parse(savedResults) : {});
+    setExpandedId(null);
+  }, [activeAppId]);
+
+  const resultsKey = `omnitest_exec_results_${activeAppId || 'default'}`;
+  const [testResults, setTestResults] = useState<Record<string, any>>(() => {
+    const key = `omnitest_exec_results_${activeAppId || 'default'}`;
+    const saved = sessionStorage.getItem(key);
+    return saved ? JSON.parse(saved) : {};
+  });
+
   const activeApp = applications.find(app => app.id === activeAppId);
-  const consoleEndRef = useRef<HTMLDivElement>(null);
-  const simulationTimerRef = useRef<any | null>(null);
-
-  useEffect(() => {
-    consoleEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [simLogs]);
 
   useEffect(() => {
     if (selectedTestIdsForRun.length > 0) {
-      const selectedTitles = selectedTestIdsForRun
-        .map(id => testCases.find(tc => tc.id === id)?.title)
-        .filter(Boolean)
-        .join(', ');
-      setNlCommand(`Execute suite: [${selectedTitles}]`);
-    }
-  }, [selectedTestIdsForRun, testCases]);
-
-  useEffect(() => {
-    return () => {
-      if (simulationTimerRef.current) clearInterval(simulationTimerRef.current);
-    };
-  }, []);
-
-  const handleCancelSimulation = () => {
-    if (simulationTimerRef.current) clearInterval(simulationTimerRef.current);
-    setIsSimulating(false);
-    setSimLogs([]);
-  };
-
-  const getAppUrl = () => activeApp ? activeApp.url : 'https://saucedemo.com';
-
-  const startSimulation = async () => {
-    if (!activeAppId) return;
-    
-    setIsSimulating(true);
-    setSimLogs([]);
-    
-    const time = () => new Date().toTimeString().split(' ')[0];
-    pushLogDirect('info', 'Contacting local Stagehand automation worker agent...');
-
-    // Extract target actions
-    let activeStepsTextArray: string[] = [];
-    if (selectedTestIdsForRun.length > 0) {
-      selectedTestIdsForRun.forEach(id => {
-        const tc = testCases.find(t => t.id === id);
-        if (tc) tc.steps.forEach(s => activeStepsTextArray.push(s.instruction));
+      setStagedIds(prev => {
+        const merged = [...prev];
+        selectedTestIdsForRun.forEach(id => {
+          if (!merged.includes(id)) merged.push(id);
+        });
+        return merged;
       });
-    } else {
-      activeStepsTextArray = [nlCommand];
     }
+  }, [selectedTestIdsForRun]);
 
+  useEffect(() => { localStorage.setItem(stagedKey, JSON.stringify(stagedIds)); }, [stagedIds, stagedKey]);
+  useEffect(() => { sessionStorage.setItem(resultsKey, JSON.stringify(testResults)); }, [testResults, resultsKey]);
+
+  const stagedTests = stagedIds
+    .map(id => testCases.find(tc => tc.id === id))
+    .filter(Boolean)
+    .filter((tc: any) => tc.appId === activeAppId) as any[];
+
+  const groupedTests = stagedTests.reduce((acc: Record<string, any[]>, tc) => {
+    const section = tc.section || 'General';
+    if (!acc[section]) acc[section] = [];
+    acc[section].push(tc);
+    return acc;
+  }, {});
+
+  // Helper to save execution run to AppContext history
+  const saveToHistory = (data: any, mode: string, testCaseIds: string[], nlInstruction?: string, startTime?: number) => {
+    if (!activeAppId) return;
+    const durationMs = startTime ? Date.now() - startTime : 0;
+    const stepResults = data.step_results || data.results?.flatMap((r: any) => r.step_results || []) || [];
+    const passedCount = stepResults.filter((s: any) => s.status === 'passed').length;
+    const stepsCount = stepResults.length;
+    const status = data.passed || data.overall_status === 'PASSED' || (data.summary && data.summary.failed === 0 && data.summary.passed > 0) ? 'passed' : 'failed';
+
+    const logs = stepResults.map((s: any) => ({
+      timestamp: new Date().toTimeString().split(' ')[0],
+      type: s.status === 'passed' ? 'success' : 'error',
+      message: `[${s.step_number || '?'}] ${s.step}${s.detail ? ` — ${s.detail}` : ''}`
+    }));
+
+    addExecutionRun({
+      id: `run-${Date.now()}`,
+      appId: activeAppId,
+      testCaseIds,
+      status,
+      nlInstruction,
+      logs,
+      screenshots: [],
+      metrics: { durationMs, stepsCount, passedCount },
+      executedAt: new Date().toISOString(),
+      mode
+    } as any);
+  };
+
+  const handleClearAll = () => {
+    setTestResults({});
+    setExpandedId(null);
+    setStagedIds([]);
+    sessionStorage.removeItem(resultsKey);
+    localStorage.removeItem(stagedKey);
+    clearSelectedTests();
+  };
+
+  const handleRemoveSingle = (e: React.MouseEvent, tcId: string) => {
+    e.stopPropagation();
+    setStagedIds(prev => prev.filter(id => id !== tcId));
+  };
+
+  const handleSingleExecution = async (tc: any) => {
+    if (!activeApp?.url) return;
+    setIsProcessing(true);
+    setProcessingId(tc.id);
+    setExpandedId(tc.id);
+    const startTime = Date.now();
     try {
-      // Execute the live natural language script loop inside Stagehand
-      const executionResult = await apiService.executeNLSteps(getAppUrl(), activeStepsTextArray);
-      
-      let stepsQueue: SimActionStep[] = [];
-      executionResult.results.forEach((res: any) => {
-        stepsQueue.push({
-          log: `[STAGEHAND] Action step: "${res.step}"`,
-          logType: res.status === 'PASSED' ? 'info' : 'error',
-          browserState: 'catalog'
-        });
-        stepsQueue.push({
-          log: `[RESULT] Status execution pointer: ${res.status}. (${res.detail})`,
-          logType: res.status === 'PASSED' ? 'success' : 'error',
-          browserState: 'catalog'
-        });
-      });      
-      let idx = 0;
-      simulationTimerRef.current = setInterval(() => {
-        if (idx >= stepsQueue.length) {
-          clearInterval(simulationTimerRef.current);
-          setIsSimulating(false);
-          return;
-        }
-        const currentStep = stepsQueue[idx];
-        setSimLogs(prev => [...prev, { timestamp: time(), type: currentStep.logType, message: currentStep.log }]);
-        idx++;
-      }, 1000 / simSpeed);
-
-    } catch (err: any) {
-      pushLogDirect('error', `Stagehand Framework Error: ${err.message}`);
-      setIsSimulating(false);
+      const steps = tc.steps.map((s: any) => s.instruction || s);
+      const res = await fetch(`${API_BASE}/execute/single`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: activeApp.url, steps, title: tc.title, expected_result: tc.steps[tc.steps.length - 1]?.expected || '' })
+      });
+      const data = await res.json();
+      setTestResults(prev => ({ ...prev, [tc.title]: data }));
+      saveToHistory(data, 'headful_single', [tc.id], tc.title, startTime);
+    } catch (err) {
+      console.error('Single execution error:', err);
+    } finally {
+      setIsProcessing(false);
+      setProcessingId(null);
     }
   };
 
-  const pushLogDirect = (type: any, msg: string) => {
-    const timeStr = new Date().toTimeString().split(' ')[0];
-    setSimLogs(prev => [...prev, { timestamp: timeStr, type, message: msg }]);
+  const handleBulkExecution = async () => {
+    if (!activeApp?.url || stagedTests.length === 0) return;
+    setIsProcessing(true);
+    const startTime = Date.now();
+    try {
+      const testCasesPayload = stagedTests.map(tc => ({
+        title: tc.title,
+        steps: tc.steps.map((s: any) => s.instruction || s),
+        expected_result: tc.steps[tc.steps.length - 1]?.expected || '',
+        type: tc.source || 'functional'
+      }));
+      const res = await fetch(`${API_BASE}/execute/suite`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ base_url: activeApp.url, test_cases: testCasesPayload })
+      });
+      const data = await res.json();
+      const resultMap: Record<string, any> = {};
+      if (data?.results) {
+        data.results.forEach((r: any) => { resultMap[r.title] = r; });
+      }
+      setTestResults(prev => ({ ...prev, ...resultMap }));
+      saveToHistory(data, 'headless_suite', stagedTests.map(tc => tc.id), undefined, startTime);
+    } catch (err) {
+      console.error('Suite execution error:', err);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleNLExecution = async () => {
+    if (!nlCommand.trim() || !activeApp?.url) return;
+    setIsProcessing(true);
+    const startTime = Date.now();
+    try {
+      const steps = nlCommand.split(/[\n;]+/).map(s => s.trim()).filter(Boolean);
+      const res = await fetch(`${API_BASE}/execute/nl`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: activeApp.url, steps })
+      });
+      const data = await res.json();
+      setTestResults(prev => ({ ...prev, ['NL Ad-hoc Script Engine Trace']: data }));
+      setExpandedId('nl-adhoc-card');
+      saveToHistory(data, 'headful_nl', [], nlCommand, startTime);
+    } catch (err) {
+      console.error('NL execution error:', err);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const renderStepTrace = (stepResults: any[]) => (
+    <div style={{ background: '#020617', padding: '1.25rem', borderRadius: '10px', marginBottom: '1.5rem' }}>
+      <div style={{ color: '#38bdf8', fontSize: '0.75rem', fontWeight: 800, marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem', letterSpacing: '0.05em' }}>
+        <TerminalIcon size={14} /> ORCHESTRATION_TRACE_STREAM
+      </div>
+      <div style={{ maxHeight: '180px', overflowY: 'auto' }}>
+        {stepResults?.map((st: any, i: number) => (
+          <div key={i} style={{ color: '#cbd5e1', fontSize: '0.8rem', fontFamily: 'monospace', marginBottom: '6px', lineHeight: '1.4' }}>
+            <span style={{ color: st.status === 'passed' ? '#10b981' : '#ef4444', marginRight: '8px' }}>●</span>
+            <span style={{ color: '#475569', marginRight: '8px' }}>[{st.step_number ?? i + 1}]</span>
+            {st.step}
+            {st.status === 'failed' && <span style={{ color: '#fca5a5', fontStyle: 'italic' }}> ({st.detail})</span>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  const renderSlideshow = (screenshots: any[], isHeadfulOnly = false) => (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#475569', fontSize: '0.75rem', fontWeight: 800, letterSpacing: '0.05em' }}>
+        <ImageIcon size={14} /> VISUAL_CHRONOLOGY SLIDESHOW
+      </div>
+      <div style={{ display: 'flex', gap: '1rem', overflowX: 'auto', paddingBottom: '0.75rem' }}>
+        {isHeadfulOnly ? (
+          <p style={{ fontSize: '0.8rem', color: '#94a3b8', fontStyle: 'italic' }}>No checkpoints captured. (Interactive display targets execute completely live inside the headful desktop window frame).</p>
+        ) : !screenshots || screenshots.length === 0 ? (
+          <p style={{ fontSize: '0.8rem', color: '#94a3b8', fontStyle: 'italic' }}>No screenshots captured.</p>
+        ) : (
+          screenshots.map((s: any, i: number) => (
+            <div key={i} style={{ flexShrink: 0, width: '140px' }}>
+              <div style={{ position: 'relative', borderRadius: '8px', overflow: 'hidden', border: `2px solid ${s.status === 'passed' ? '#10b981' : '#ef4444'}`, cursor: 'zoom-in' }}
+                onClick={() => setLightboxImg(s.image_base64)}>
+                <img src={`data:image/png;base64,${s.image_base64}`} style={{ width: '100%', height: '85px', objectFit: 'cover' }} alt={`Step ${s.step_number}`} />
+                <div style={{ position: 'absolute', bottom: 4, right: 4, background: 'rgba(15,23,42,0.6)', borderRadius: '4px', padding: '2px' }}>
+                  <Maximize2 size={10} color="#fff" />
+                </div>
+              </div>
+              <div style={{ fontSize: '0.65rem', color: '#64748b', marginTop: '6px', fontWeight: 600 }}>Step {s.step_number}</div>
+              <div style={{ fontSize: '0.6rem', color: s.status === 'passed' ? '#10b981' : '#ef4444', fontWeight: 700 }}>{s.status?.toUpperCase()}</div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+
+  const renderTestCard = (tc: any) => {
+    const result = testResults[tc.title];
+    const isExpanded = expandedId === tc.id;
+    const isRunning = processingId === tc.id;
+    const modeLabel = result?.mode === 'headful_single_with_screenshots' ? 'Headful (Live)' : result?.mode === 'headless_suite' ? 'Headless (Suite Timeline)' : 'Headful (Live)';
+    const isHeadfulOnly = result?.mode === 'headful_single' || (!result?.screenshots?.length && result?.mode !== 'headless_suite');
+
+    return (
+      <div key={tc.id} style={{ border: '1px solid #e2e8f0', borderRadius: '12px', background: isExpanded ? '#f8fafc' : '#fff', overflow: 'hidden' }}>
+        <div style={{ padding: '1rem 1.25rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem', flex: 1, cursor: 'pointer' }} onClick={() => setExpandedId(isExpanded ? null : tc.id)}>
+            {isRunning ? <Loader2 className="animate-spin" size={22} color="#6366f1" /> :
+              result ? (result.passed ? <CheckCircle2 color="#10b981" size={22} /> : <XCircle color="#ef4444" size={22} />) :
+              <div style={{ width: '22px', height: '22px', borderRadius: '50%', border: '2px solid #e2e8f0' }} />}
+            <div>
+              <div style={{ fontWeight: 700, color: '#1e293b', fontSize: '1rem' }}>{tc.title}</div>
+              <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 500 }}>
+                {tc.steps.length} Actions •{' '}
+                {result ? (result.passed ? '✓ Passed' : '✗ Failed') : 'Pending'} •{' '}
+                <span style={{ color: '#6366f1' }}>{result ? modeLabel : 'Headful (Live)'}</span>
+              </div>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: '0.75rem' }}>
+            <button onClick={(e) => { e.stopPropagation(); handleSingleExecution(tc); }} disabled={isProcessing}
+              style={{ padding: '8px', borderRadius: '8px', border: '1px solid #e2e8f0', background: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+              <Play size={16} style={{ color: '#0f172a' }} />
+            </button>
+            <button onClick={(e) => handleRemoveSingle(e, tc.id)}
+              style={{ padding: '8px', borderRadius: '8px', border: '1px solid #fee2e2', background: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+              <Trash2 size={16} style={{ color: '#ef4444' }} />
+            </button>
+          </div>
+        </div>
+        {isExpanded && result && (
+          <div style={{ padding: '1.25rem', borderTop: '1px solid #e2e8f0', background: '#ffffff' }}>
+            {renderStepTrace(result.step_results || [])}
+            {renderSlideshow(result.screenshots || [], isHeadfulOnly)}
+          </div>
+        )}
+      </div>
+    );
   };
 
   return (
-    <div className="executor-view">
-      <div className="view-header">
-        <h1>Execution Console</h1>
-        <p>Interpret natural language instructions, compile step hierarchies, and visually observe the agent executing actions on the target application.</p>
+    <div className="dashboard-view">
+      <div className="view-header" style={{ marginBottom: '2rem' }}>
+        <h1>Execution Lab Space</h1>
+        <p>Execute individual test cases in an interactive browser session or run full suites in headless mode with automated step-by-step screenshot capture.</p>
       </div>
 
-      {!activeAppId ? (
-        <div className="glass-card" style={{ textAlign: 'center', padding: '3rem', marginTop: '1.5rem' }}>
-          <p>Please select an application to enable execution tools.</p>
+      {/* NL CONTROLLER */}
+      <div className="glass-card" style={{ background: '#ffffff', borderRadius: '16px', border: '1px solid #e2e8f0', padding: '1.5rem', marginBottom: '2rem', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.05)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+          <Command size={18} color="#0891b2" />
+          <span style={{ fontSize: '0.8rem', fontWeight: 800, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.05em' }}>NL Execution Controller</span>
         </div>
-      ) : (
-        <div className="executor-layout">
-          <div className="executor-controls-logs">
-            <div className="glass-card">
-              <span className="selector-label" style={{ display: 'block', marginBottom: '0.55rem' }}>Natural Language Execution Script</span>
-              <div className="prompt-bar-wrapper">
-                <input 
-                  type="text" 
-                  className="input-field" 
-                  placeholder="e.g. Add product retro runners, apply code SAVE15 and verify checkout..."
-                  value={nlCommand}
-                  onChange={(e) => setNlCommand(e.target.value)}
-                  disabled={isSimulating}
-                  style={{ fontFamily: 'var(--font-mono)', fontSize: '0.85rem' }}
-                />
-                {!isSimulating ? (
-                  <button type="button" className="btn btn-accent" onClick={startSimulation} disabled={!nlCommand.trim()}>
-                    <Play size={16} />
-                    <span>Run Suite</span>
-                  </button>
-                ) : (
-                  <div style={{ display: 'flex', gap: '0.35rem' }}>
-                    <button type="button" className="btn btn-danger" onClick={handleCancelSimulation}>
-                      <RotateCcw size={16} />
-                    </button>
+        <p style={{ fontSize: '0.78rem', color: '#94a3b8', marginBottom: '1rem' }}>Enter plain-English test instructions, one per line or separated by semicolons. Executes in an interactive browser session with screenshot capture.</p>
+        <div style={{ display: 'flex', gap: '1rem' }}>
+          <textarea className="input-field" value={nlCommand} onChange={(e) => setNlCommand(e.target.value)}
+            placeholder={"Navigate to the login page\nEnter valid email and password\nClick the login button"}
+            rows={3} style={{ flex: 1, padding: '0.75rem 1.25rem', borderRadius: '12px', border: '1px solid #cbd5e1', outline: 'none', fontSize: '0.9rem', resize: 'vertical', fontFamily: 'Inter, system-ui, sans-serif', color: '#1e293b', background: '#f8fafc', fontWeight: 400 }} />
+          <button onClick={handleNLExecution} disabled={isProcessing || !nlCommand.trim()}
+            style={{ borderRadius: '8px', padding: '8px 20px', background: '#06b6d4', color: '#fff', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.6rem', border: 'none', cursor: 'pointer', alignSelf: 'center', fontSize: '0.85rem' }}>
+            {isProcessing && !processingId ? <Loader2 className="animate-spin" size={18} /> : <Play size={18} />}
+            <span>Run</span>
+          </button>
+        </div>
+      </div>
+
+      {/* QUEUE */}
+      <div className="glass-card" style={{ background: '#ffffff', borderRadius: '16px', border: '1px solid #e2e8f0', padding: '1.5rem', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.05)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <ListTodo size={18} color="#6366f1" />
+            <span style={{ fontSize: '0.8rem', fontWeight: 800, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              Staged Suite Queue ({stagedTests.length})
+            </span>
+          </div>
+          <div style={{ display: 'flex', gap: '0.75rem' }}>
+            <button onClick={handleClearAll} style={{ background: '#f1f5f9', color: '#475569', border: 'none', padding: '8px 16px', borderRadius: '8px', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer' }}>Clear All</button>
+            <button onClick={handleBulkExecution} disabled={isProcessing || stagedTests.length === 0}
+              style={{ background: '#0f172a', color: '#fff', display: 'flex', alignItems: 'center', gap: '0.6rem', padding: '8px 20px', borderRadius: '8px', fontWeight: 700, border: 'none', cursor: 'pointer' }}>
+              {isProcessing && !processingId ? <Loader2 className="animate-spin" size={16} /> : null}
+              Run Suite
+            </button>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+          {/* NL Result */}
+          {testResults['NL Ad-hoc Script Engine Trace'] && (
+            <div style={{ border: '1px solid #06b6d4', borderRadius: '12px', background: '#f0fdfa', overflow: 'hidden' }}>
+              <div style={{ padding: '1rem 1.25rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
+                onClick={() => setExpandedId(expandedId === 'nl-adhoc-card' ? null : 'nl-adhoc-card')}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem' }}>
+                  {testResults['NL Ad-hoc Script Engine Trace'].overall_status === 'PASSED' || testResults['NL Ad-hoc Script Engine Trace'].passed
+                    ? <CheckCircle2 color="#10b981" size={22} /> : <XCircle color="#ef4444" size={22} />}
+                  <div>
+                    <div style={{ fontWeight: 700, color: '#0f172a' }}>NL Ad-hoc Script Engine Trace</div>
+                    <div style={{ fontSize: '0.8rem', color: '#0891b2', fontWeight: 600 }}>Autonomous Step Execution — Headful (Live)</div>
+                  </div>
+                </div>
+              </div>
+              {expandedId === 'nl-adhoc-card' && (
+                <div style={{ padding: '1.25rem', borderTop: '1px solid #e2e8f0', background: '#ffffff' }}>
+                  {renderStepTrace(testResults['NL Ad-hoc Script Engine Trace'].step_results || [])}
+                  {renderSlideshow(testResults['NL Ad-hoc Script Engine Trace'].screenshots || [], false)}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Grouped test cases */}
+          {stagedTests.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '4rem 0', color: '#94a3b8' }}>
+              <Layers size={40} style={{ opacity: 0.2, marginBottom: '1rem' }} />
+              <p style={{ fontWeight: 500 }}>No scenarios staged. Select items from Test Cases to begin.</p>
+            </div>
+          ) : (
+            Object.entries(groupedTests).map(([section, tests]) => (
+              <div key={section}>
+                <div
+                  onClick={() => toggleSection(section)}
+                  style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.6rem 0.75rem', marginBottom: '0.5rem', borderRadius: '8px', background: '#f8fafc', border: '1px solid #e2e8f0', cursor: 'pointer', userSelect: 'none' }}>
+                  <Layers size={14} color="#6366f1" />
+                  <span style={{ fontSize: '0.75rem', fontWeight: 800, color: '#6366f1', textTransform: 'uppercase', letterSpacing: '0.06em', flex: 1 }}>{section}</span>
+                  <span style={{ fontSize: '0.7rem', color: '#94a3b8', fontWeight: 600, marginRight: '0.5rem' }}>({tests.length})</span>
+                  <span style={{ fontSize: '0.7rem', color: '#94a3b8', transition: 'transform 0.2s', display: 'inline-block', transform: expandedSections[section] === false ? 'rotate(-90deg)' : 'rotate(0deg)' }}>▼</span>
+                </div>
+                {expandedSections[section] !== false && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1rem' }}>
+                    {(tests as any[]).map(tc => renderTestCard(tc))}
                   </div>
                 )}
               </div>
-            </div>
+            ))
+          )}
+        </div>
+      </div>
 
-            <div className="glass-card" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-              <div className="console-header">
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <TerminalIcon size={16} />
-                  <span>Execution Logs</span>
-                </div>
-              </div>
-              <div className="console-container" style={{ flex: 1, maxHeight: '350px', overflowY: 'auto' }}>
-                {simLogs.length === 0 ? (
-                  <p style={{ color: 'var(--text-muted)' }}>Console ready. Provide a natural language command or select a test case to execute.</p>
-                ) : (
-                  simLogs.map((log, index) => (
-                    <div key={index} className="console-log-line">
-                      <span className="console-timestamp">[{log.timestamp}]</span>
-                      <span className={`console-type-${log.type}`}>{log.type.toUpperCase()}:</span>
-                      <span>{log.message}</span>
-                    </div>
-                  ))
-                )}
-                <div ref={consoleEndRef} />
-              </div>
-            </div>
-          </div>
-
-          <div className="executor-sim-pane">
-            <div className="browser-simulator">
-              <div className="browser-navbar">
-                <div style={{ display: 'flex', gap: '4px' }}>
-                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: '#cbd5e1' }}></span>
-                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: '#cbd5e1' }}></span>
-                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: '#cbd5e1' }}></span>
-                </div>
-                <div className="browser-address">
-                  <Globe size={12} />
-                  <span>{getAppUrl()}</span>
-                </div>
-              </div>
-              <div className="browser-viewport" style={{ backgroundColor: '#1e293b', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.85rem' }}>
-                <div style={{ textAlign: 'center', padding: '2rem' }}>
-                  <p style={{ fontWeight: 600, color: 'var(--accent-cyan)' }}>[STAGEHAND AUTOMATION SESSION]</p>
-                  <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
-                    Agent running headless browser loop against endpoint URL targets. Check console output lines on the left panel for deep diagnostics.
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
+      {/* LIGHTBOX */}
+      {lightboxImg && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(2,6,23,0.85)', backdropFilter: 'blur(4px)', zIndex: 3000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}
+          onClick={() => setLightboxImg(null)}>
+          <img src={`data:image/png;base64,${lightboxImg}`} style={{ maxWidth: '95%', maxHeight: '95%', borderRadius: '16px', boxShadow: '0 25px 50px -12px rgba(0,0,0,0.5)' }} alt="Fullscreen" />
         </div>
       )}
     </div>

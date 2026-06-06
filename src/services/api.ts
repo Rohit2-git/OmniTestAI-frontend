@@ -63,18 +63,66 @@ export const apiService = {
   },
 
   /**
-   * Triggers Stagehand AI execution runs against web targets matching a list of instructions
+   * a] Execute Single Test (Interactive Headful Mode)
+   * Sends raw script string arrays straight into the launcher.
+   */
+  executeSingleTest: async (runId: number, baseUrl: string, steps: string[]): Promise<any> => {
+    const response = await fetch(`${BASE_URL}/execute/single`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        run_id: runId, 
+        base_url: baseUrl,
+        is_single: true,
+        steps: steps // Pipes active strings directly from UI layout memory
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `Single headful execution failed: ${response.status}`);
+    }
+    return response.json();
+  },
+
+  /**
+   * b] Execute Bulk Test Run (Headless Pipeline + Screenshot Chronology)
+   */
+  executeTestRun: async (runId: number, baseUrl: string): Promise<any> => {
+    const response = await fetch(`${BASE_URL}/execute/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        run_id: runId, 
+        base_url: baseUrl,
+        is_single: false 
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `Bulk pipeline execution failed: ${response.status}`);
+    }
+    return response.json();
+  },
+
+  /**
+   * c] NL Executor (Autonomous Headless Stream + Screenshots)
    */
   executeNLSteps: async (url: string, steps: string[]): Promise<any> => {
     const response = await fetch(`${BASE_URL}/execute/nl`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, steps }),
+      body: JSON.stringify({ 
+        url, 
+        steps,
+        is_single: false 
+      }),
     });
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `Execution failed with status: ${response.status}`);
+      throw new Error(errorData.detail || `NL execution failed with status: ${response.status}`);
     }
     return response.json();
   },
@@ -134,8 +182,8 @@ export const apiService = {
   },
 
   /**
-   * CONNECTED: Fetches live telemetry aggregate counters from the backend SQLite database
-   * to feed real-time values into the primary Command Center dashboard cards.
+   * CONNECTED: Fetches live telemetry aggregate counters from the backend database
+   * to feed real-time values into the primary Center dashboard cards.
    */
   getLiveDashboardMetrics: async (): Promise<any> => {
     const response = await fetch(`${BASE_URL}/dashboard/metrics`, {
@@ -143,6 +191,21 @@ export const apiService = {
     });
     if (!response.ok) {
       throw new Error(`Metrics aggregation terminal failure: ${response.status}`);
+    }
+    return response.json();
+  },
+
+  /**
+   * ADDED MECHANIC: Fetches comprehensive historical run logs and assertion statuses
+   * from the backend relative database stack to supply the Insights view.
+   */
+  getExecutionHistory: async (runId: number): Promise<any> => {
+    const response = await fetch(`${BASE_URL}/results/${runId}/execution`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch history details for run reference ID: ${runId}`);
     }
     return response.json();
   }

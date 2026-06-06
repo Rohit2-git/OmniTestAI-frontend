@@ -323,7 +323,7 @@ export const Generator: React.FC = () => {
 
       {/* Generated Batches Output Lists */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', paddingBottom: '2rem' }}>
-        {generationBatches.map((batch) => {
+        {generationBatches.filter((batch) => batch.appId === activeAppId || batch.testCases?.some((tc: any) => tc.appId === activeAppId)).map((batch) => {
           const batchIds = batch.testCases.map(t => t.id);
           const selectedInBatchCount = batch.testCases.filter((t: any) => selectedCardIds.includes(t.id)).length;
           const isAllBatchChecked = batchIds.length > 0 && batchIds.every(id => selectedCardIds.includes(id));

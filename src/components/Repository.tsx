@@ -208,6 +208,106 @@ export const Repository: React.FC<RepositoryProps> = ({ setActiveTab, setSelecte
           )}
         </div>
       )}
+
+      {/* CREATE / EDIT TEST CASE DIALOG */}
+      <dialog ref={addDialogRef} onClick={(e) => { if (e.target === addDialogRef.current) addDialogRef.current?.close(); }}
+        style={{ borderRadius: '16px', border: '1px solid #e5e7eb', padding: 0, maxWidth: '560px', width: '90vw', boxShadow: '0 25px 50px rgba(0,0,0,0.15)', background: '#fff' }}>
+        <div style={{ padding: '1.5rem', borderBottom: '1px solid #f3f4f6', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h2 style={{ fontSize: '1.2rem', fontWeight: 700, color: '#111827' }}>
+            {editingTestId ? 'Edit Test Case' : 'Create Test Case'}
+          </h2>
+          <button type="button" onClick={() => addDialogRef.current?.close()} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9ca3af', padding: '4px', borderRadius: '50%' }}>
+            <X size={20} />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmitTestCase} style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.25rem', maxHeight: '70vh', overflowY: 'auto' }}>
+
+          {/* Title */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+            <label style={{ fontSize: '0.8rem', fontWeight: 700, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Test Case Title *</label>
+            <input className="input-field" required value={formTitle} onChange={e => setFormTitle(e.target.value)}
+              placeholder="e.g. Login with valid credentials"
+              style={{ padding: '0.75rem 1rem', borderRadius: '8px', border: '1px solid #d1d5db', fontSize: '0.95rem', outline: 'none', width: '100%' }} />
+          </div>
+
+          {/* Section & Priority row */}
+          <div style={{ display: 'flex', gap: '1rem' }}>
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+              <label style={{ fontSize: '0.8rem', fontWeight: 700, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Module / Section</label>
+              <input className="input-field" value={formSection} onChange={e => setFormSection(e.target.value)}
+                placeholder="e.g. Auth, Checkout"
+                style={{ padding: '0.75rem 1rem', borderRadius: '8px', border: '1px solid #d1d5db', fontSize: '0.9rem', outline: 'none' }} />
+            </div>
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+              <label style={{ fontSize: '0.8rem', fontWeight: 700, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Priority</label>
+              <select className="select-field" value={formPriority} onChange={e => setFormPriority(e.target.value as any)}
+                style={{ padding: '0.75rem 1rem', borderRadius: '8px', border: '1px solid #d1d5db', fontSize: '0.9rem', outline: 'none', background: '#fff' }}>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Steps */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+            <label style={{ fontSize: '0.8rem', fontWeight: 700, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+              Test Steps ({formSteps.length})
+            </label>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+              {formSteps.map((step, idx) => (
+                <div key={idx} style={{ border: '1px solid #e5e7eb', borderRadius: '10px', padding: '1rem', background: '#f9fafb', position: 'relative' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                    <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#008080' }}>Step {idx + 1}</span>
+                    {formSteps.length > 1 && (
+                      <button type="button" onClick={() => setFormSteps(prev => prev.filter((_, i) => i !== idx))}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444', padding: '2px', borderRadius: '4px', display: 'flex', alignItems: 'center' }}>
+                        <X size={14} />
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    value={step.instruction}
+                    onChange={e => setFormSteps(prev => prev.map((s, i) => i === idx ? { ...s, instruction: e.target.value } : s))}
+                    placeholder="Describe what to do (e.g. Click the login button)"
+                    required
+                    style={{ width: '100%', padding: '0.6rem 0.85rem', borderRadius: '6px', border: '1px solid #d1d5db', fontSize: '0.875rem', outline: 'none', background: '#fff', marginBottom: '0.5rem', boxSizing: 'border-box' }}
+                  />
+                  <input
+                    value={step.expected}
+                    onChange={e => setFormSteps(prev => prev.map((s, i) => i === idx ? { ...s, expected: e.target.value } : s))}
+                    placeholder="Expected result (e.g. User is redirected to dashboard)"
+                    style={{ width: '100%', padding: '0.6rem 0.85rem', borderRadius: '6px', border: '1px solid #d1d5db', fontSize: '0.875rem', outline: 'none', background: '#fff', boxSizing: 'border-box' }}
+                  />
+                </div>
+              ))}
+
+              {/* Add step button */}
+              <button type="button"
+                onClick={() => setFormSteps(prev => [...prev, { instruction: '', expected: '' }])}
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', padding: '0.65rem', borderRadius: '8px', border: '1.5px dashed #d1d5db', background: 'transparent', color: '#6b7280', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 600, transition: 'all 0.15s' }}
+                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = '#008080'; (e.currentTarget as HTMLButtonElement).style.color = '#008080'; }}
+                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = '#d1d5db'; (e.currentTarget as HTMLButtonElement).style.color = '#6b7280'; }}>
+                <Plus size={16} /> Add Another Step
+              </button>
+            </div>
+          </div>
+
+          {/* Actions */}
+          <div style={{ display: 'flex', gap: '0.75rem', paddingTop: '0.5rem', borderTop: '1px solid #f3f4f6' }}>
+            <button type="button" onClick={() => addDialogRef.current?.close()}
+              style={{ flex: 1, padding: '0.75rem', borderRadius: '8px', border: '1px solid #e5e7eb', background: '#f9fafb', color: '#374151', fontWeight: 600, cursor: 'pointer', fontSize: '0.9rem' }}>
+              Cancel
+            </button>
+            <button type="submit"
+              style={{ flex: 2, padding: '0.75rem', borderRadius: '8px', border: 'none', background: '#008080', color: '#fff', fontWeight: 700, cursor: 'pointer', fontSize: '0.9rem' }}>
+              {editingTestId ? 'Save Changes' : 'Create Test Case'}
+            </button>
+          </div>
+        </form>
+      </dialog>
     </div>
   );
 };
