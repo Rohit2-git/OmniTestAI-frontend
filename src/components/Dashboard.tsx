@@ -34,7 +34,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
   });
   const [loading, setLoading] = useState(true);
 
-  // Management Modal UI States
   const [isManageModalOpen, setIsManageModalOpen] = useState(false);
   const [editingAppId, setEditingAppId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
@@ -44,9 +43,18 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
     const fetchMetrics = async () => {
       try {
         const data = await apiService.getLiveDashboardMetrics();
-        setServerMetrics(data);
+        if (data) {
+          setServerMetrics({
+            totalTestCases: data.totalTestCases ?? 0,
+            aiGeneratedTests: data.aiGeneratedTests ?? 0,
+            manualAuthoredTests: data.manualAuthoredTests ?? 0,
+            overallPassRate: data.overallPassRate ?? 100,
+            runningJobs: data.runningJobs ?? 0,
+            totalKnowledgeAssets: data.totalKnowledgeAssets ?? 0
+          });
+        }
       } catch (err) {
-        console.error("Dashboard glass template data synchronization failed:", err);
+        console.error("Dashboard telemetry synchronization failed:", err);
       } finally {
         setLoading(false);
       }
@@ -55,15 +63,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
   }, [applications, history, testCases]);
 
   const totalApps = applications.length;
-  const totalSavedTestCases = testCases.length;
-
-  const aiTestsCount = testCases.filter(tc => 
-    tc.runId || tc.source === 'ai' || !tc.source || tc.source !== 'manual'
-  ).length;
-
-  const manualTestsCount = testCases.filter(tc => 
-    tc.source === 'manual'
-  ).length;
 
   const handleSelectApp = (appId: string) => {
     setActiveAppId(appId);
@@ -87,6 +86,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
   };
 
   const formatDate = (isoString: string) => {
+    if (!isoString) return "N/A";
     const d = new Date(isoString);
     return d.toLocaleDateString(undefined, { 
       month: 'short', 
@@ -137,7 +137,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
         )}
       </div>
 
-      {/* STATS TILES GLASS GRID */}
+      {/* STATS TILES GLASS GRID - ROW 1 */}
       <div className="dashboard-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1.5rem', marginBottom: '1.5rem' }}>
         <div style={{ background: 'rgba(255, 255, 255, 0.6)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255, 255, 255, 0.7)', borderRadius: '20px', padding: '1.5rem', display: 'flex', alignItems: 'center', gap: '1.25rem', boxShadow: '0 10px 15px -3px rgba(15, 23, 42, 0.04)' }}>
           <div style={{ background: '#f3e8ff', color: '#a855f7', padding: '12px', borderRadius: '12px' }}><Layers size={24} /></div>
@@ -150,7 +150,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
         <div style={{ background: 'rgba(255, 255, 255, 0.6)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255, 255, 255, 0.7)', borderRadius: '20px', padding: '1.5rem', display: 'flex', alignItems: 'center', gap: '1.25rem', boxShadow: '0 10px 15px -3px rgba(15, 23, 42, 0.04)' }}>
           <div style={{ background: '#ecfeff', color: '#06b6d4', padding: '12px', borderRadius: '12px' }}><Folder size={24} /></div>
           <div>
-            <span style={{ display: 'block', fontSize: '1.85rem', fontWeight: 800, color: '#0f172a', lineHeight: '1.2' }}>{totalSavedTestCases}</span>
+            <span style={{ display: 'block', fontSize: '1.85rem', fontWeight: 800, color: '#0f172a', lineHeight: '1.2' }}>{serverMetrics.totalTestCases}</span>
             <span style={{ fontSize: '0.85rem', color: '#64748b', fontWeight: 600 }}>Total Test Suite Size</span>
           </div>
         </div>
@@ -177,7 +177,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
         <div style={{ background: 'rgba(255, 255, 255, 0.6)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255, 255, 255, 0.7)', borderRadius: '20px', padding: '1.25rem', display: 'flex', alignItems: 'center', gap: '1rem', boxShadow: '0 10px 15px -3px rgba(15, 23, 42, 0.04)' }}>
           <div style={{ background: '#eff6ff', color: '#3b82f6', padding: '10px', borderRadius: '10px' }}><PenSquare size={20} /></div>
           <div>
-            <span style={{ display: 'block', fontSize: '1.5rem', fontWeight: 800, color: '#0f172a' }}>{manualTestsCount}</span>
+            <span style={{ display: 'block', fontSize: '1.5rem', fontWeight: 800, color: '#0f172a' }}>{serverMetrics.manualAuthoredTests}</span>
             <span style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 500 }}>Manual Authored</span>
           </div>
         </div>
@@ -185,7 +185,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
         <div style={{ background: 'rgba(255, 255, 255, 0.6)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255, 255, 255, 0.7)', borderRadius: '20px', padding: '1.25rem', display: 'flex', alignItems: 'center', gap: '1rem', boxShadow: '0 10px 15px -3px rgba(15, 23, 42, 0.04)' }}>
           <div style={{ background: '#ecfeff', color: '#06b6d4', padding: '10px', borderRadius: '10px' }}><Bot size={20} /></div>
           <div>
-            <span style={{ display: 'block', fontSize: '1.5rem', fontWeight: 800, color: '#0f172a' }}>{aiTestsCount}</span>
+            <span style={{ display: 'block', fontSize: '1.5rem', fontWeight: 800, color: '#0f172a' }}>{serverMetrics.aiGeneratedTests}</span>
             <span style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 500 }}>AI Generated</span>
           </div>
         </div>
@@ -210,8 +210,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
         </button>
       </div>
 
-      {/* MODULE LAYOUT SPLIT ROW */}
-      <div className="dashboard-grid" style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '2rem' }}>
+      {/* OPTIMIZED MASTER COLUMN LAYOUT SPLIT (62% Ecosystems vs 38% Telemetry Module) */}
+      <div style={{ display: 'grid', gridTemplateColumns: '62% 38%', gap: '2rem', alignItems: 'start' }}>
         
         {/* WORKSPACE APP GRIDS */}
         <div>
@@ -231,27 +231,26 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
               <p style={{ color: '#64748b', fontWeight: 500 }}>No environment configurations found. Select the sidebar "+" node to deploy.</p>
             </div>
           ) : (
-            <div className="dashboard-apps-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.25rem' }}>
               {applications.map(app => {
                 const isActive = app.id === activeAppId;
                 return (
                   <div 
                     key={app.id} 
-                    className="app-card"
                     onClick={() => handleSelectApp(app.id)}
-                    style={{ background: '#ffffff', border: isActive ? '2px solid #06b6d4' : '1px solid #e2e8f0', boxShadow: isActive ? '0 12px 20px -3px rgba(6,182,212,0.12)' : '0 4px 6px -1px rgba(0,0,0,0.02)', borderRadius: '20px', padding: '1.5rem', cursor: 'pointer', position: 'relative' }}
+                    style={{ background: '#ffffff', border: isActive ? '2px solid #06b6d4' : '1px solid #e2e8f0', boxShadow: isActive ? '0 12px 20px -3px rgba(6,182,212,0.12)' : '0 4px 6px -1px rgba(0,0,0,0.02)', borderRadius: '20px', padding: '1.25rem', cursor: 'pointer', position: 'relative' }}
                   >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                      <strong style={{ fontSize: '1.1rem', color: '#0f172a', fontWeight: 700 }}>{app.name}</strong>
-                      <span style={{ fontSize: '0.65rem', fontWeight: 700, background: app.platform === 'web' ? '#ecfeff' : '#f5f3ff', color: app.platform === 'web' ? '#0891b2' : '#7c3aed', padding: '4px 8px', borderRadius: '6px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                      <strong style={{ fontSize: '1rem', color: '#0f172a', fontWeight: 700 }}>{app.name}</strong>
+                      <span style={{ fontSize: '0.65rem', fontWeight: 700, background: app.platform === 'web' ? '#ecfeff' : '#f5f3ff', color: app.platform === 'web' ? '#0891b2' : '#7c3aed', padding: '4px 8px', borderRadius: '6px', textTransform: 'uppercase' }}>
                         {app.platform}
                       </span>
                     </div>
-                    <p style={{ fontSize: '0.9rem', color: '#475569', lineHeight: '1.6', minHeight: '4.5em', margin: 0 }}>
+                    <p style={{ fontSize: '0.85rem', color: '#475569', lineHeight: '1.5', minHeight: '4.5em', margin: '0 0 1rem 0' }}>
                       {app.description || "Active cross-platform verification framework layout profile target assignment."}
                     </p>
                     
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1.25rem', pt: '1rem', borderTop: '1px solid #f1f5f9', fontSize: '0.8rem', color: '#64748b', fontWeight: 500 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', pt: '0.75rem', borderTop: '1px solid #f1f5f9', fontSize: '0.78rem', color: '#64748b', fontWeight: 500 }}>
                       <span>{getAppTestCount(app.id)} Active Blueprints</span>
                       <span>Pass Index: <strong style={{ color: '#0f172a', fontWeight: 700 }}>{getAppPassRate(app.id)}</strong></span>
                     </div>
@@ -262,12 +261,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
           )}
         </div>
 
-        {/* STREAMING RECENT ACTIVITY TIMELINE */}
+        {/* TELEMETRY STREAM PANEL */}
         <div>
           <h2 style={{ fontSize: '1.35rem', fontWeight: 800, color: '#0f172a', marginBottom: '1.25rem', letterSpacing: '-0.01em' }}>Telemetry Stream</h2>
-          <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '24px', padding: '1.5rem', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.02)', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+          <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '24px', padding: '1.25rem', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.02)', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
             {history.length === 0 ? (
-              <p style={{ textAlign: 'center', padding: '2rem 0', color: '#64748b', fontSize: '0.9rem', fontWeight: 500 }}>No automation logs stored.</p>
+              <p style={{ textAlign: 'center', padding: '3.5rem 0', color: '#64748b', fontSize: '0.9rem', fontWeight: 500 }}>No automation logs stored.</p>
             ) : (
               history.slice(0, 4).map(run => (
                 <div key={run.id} style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', paddingBottom: '1rem', borderBottom: '1px solid #f1f5f9' }}>
@@ -303,7 +302,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
         </div>
       </div>
 
-      {/* DYNAMIC CONFIGURATION OVERLAY MODAL */}
+      {/* CONFIGURATION OVERLAY MODAL */}
       {isManageModalOpen && (
         <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(15, 23, 42, 0.3)', backdropFilter: 'blur(6px)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000 }}>
           <div style={{ background: '#ffffff', width: '580px', borderRadius: '24px', padding: '1.75rem', border: '1px solid #e2e8f0', boxShadow: '0 25px 50px -12px rgba(0,0,0,0.15)' }}>

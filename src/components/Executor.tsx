@@ -16,6 +16,131 @@ interface ExecutorProps {
 
 // RESULTS_KEY is app-scoped — defined inside component
 
+const SlideshowPanel: React.FC<{ screenshots: any[]; isHeadfulOnly?: boolean; videoBase64?: string }> = ({
+  screenshots, isHeadfulOnly = false, videoBase64
+}) => {
+  const [slideIdx, setSlideIdx] = useState(0);
+  const total = screenshots.length;
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
+        <span style={{ fontSize: '0.7rem', fontWeight: 800, color: '#0891b2', textTransform: 'uppercase', letterSpacing: '0.08em' }}>▣ VISUAL_CHRONOLOGY SLIDESHOW</span>
+      </div>
+
+      {isHeadfulOnly || total === 0 ? (
+        <p style={{ fontSize: '0.8rem', color: '#94a3b8', fontStyle: 'italic' }}>No checkpoints captured. (Interactive display targets execute completely live inside the headful desktop window frame).</p>
+      ) : (
+        <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '1rem' }}>
+          <div style={{ position: 'relative', borderRadius: '8px', overflow: 'hidden', background: '#000', aspectRatio: '16/9', marginBottom: '0.75rem' }}>
+            <img
+              src={`data:image/png;base64,${screenshots[slideIdx]?.image_base64}`}
+              alt={`Step ${screenshots[slideIdx]?.step_number}`}
+              style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+            />
+            {slideIdx > 0 && (
+              <button onClick={() => setSlideIdx(i => i - 1)}
+                style={{ position: 'absolute', left: '8px', top: '50%', transform: 'translateY(-50%)', background: 'rgba(0,0,0,0.55)', border: 'none', borderRadius: '50%', width: '36px', height: '36px', color: '#fff', fontSize: '1.2rem', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                ‹
+              </button>
+            )}
+            {slideIdx < total - 1 && (
+              <button onClick={() => setSlideIdx(i => i + 1)}
+                style={{ position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', background: 'rgba(0,0,0,0.55)', border: 'none', borderRadius: '50%', width: '36px', height: '36px', color: '#fff', fontSize: '1.2rem', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                ›
+              </button>
+            )}
+            <div style={{ position: 'absolute', bottom: '8px', right: '10px', background: 'rgba(0,0,0,0.6)', color: '#fff', fontSize: '0.7rem', padding: '2px 8px', borderRadius: '10px', fontWeight: 600 }}>
+              {slideIdx + 1} / {total}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.6rem' }}>
+            <span style={{ fontSize: '0.8rem', color: '#475569', fontWeight: 600 }}>
+              Step {screenshots[slideIdx]?.step_number}: {screenshots[slideIdx]?.step}
+            </span>
+            <span style={{
+              fontSize: '0.7rem', fontWeight: 700, padding: '2px 8px', borderRadius: '6px',
+              background: screenshots[slideIdx]?.status === 'passed' ? '#dcfce7' : '#fee2e2',
+              color: screenshots[slideIdx]?.status === 'passed' ? '#16a34a' : '#dc2626'
+            }}>
+              {screenshots[slideIdx]?.status?.toUpperCase()}
+            </span>
+          </div>
+
+          <div style={{ display: 'flex', gap: '6px', overflowX: 'auto', paddingBottom: '4px' }}>
+            {screenshots.map((s: any, i: number) => (
+              <div key={i} onClick={() => setSlideIdx(i)}
+                style={{ flexShrink: 0, width: '64px', height: '42px', borderRadius: '5px', overflow: 'hidden', cursor: 'pointer', border: i === slideIdx ? '2px solid #0891b2' : '2px solid transparent', opacity: i === slideIdx ? 1 : 0.6, transition: 'all 0.15s' }}>
+                <img src={`data:image/png;base64,${s.image_base64}`} alt={`Step ${s.step_number}`} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {videoBase64 && (
+        <div style={{ marginTop: '1rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+            <span style={{ fontSize: '0.7rem', fontWeight: 800, color: '#7c3aed', textTransform: 'uppercase', letterSpacing: '0.08em' }}>▶ SESSION RECORDING</span>
+          </div>
+          <video controls style={{ width: '100%', borderRadius: '10px', border: '1px solid #e2e8f0', background: '#000', maxHeight: '400px' }}
+            src={`data:video/webm;base64,${videoBase64}`} />
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Extracted as proper React component — SlideshowPanel inside uses useState hooks
+// which cannot be called from a plain render function inside another component
+const TestCard: React.FC<{
+  tc: any; result: any; isExpanded: boolean; isRunning: boolean; isProcessing: boolean;
+  onExpand: () => void; onRun: (tc: any) => void; onRemove: (e: React.MouseEvent, id: string) => void;
+  renderStepTrace: (steps: any[]) => React.ReactNode;
+}> = ({ tc, result, isExpanded, isRunning, isProcessing, onExpand, onRun, onRemove, renderStepTrace }) => {
+  const isHeadfulOnly = result?.mode === 'headful_single' || (!result?.screenshots?.length && result?.mode !== 'headless_suite');
+  return (
+    <div style={{ border: '1px solid #e2e8f0', borderRadius: '12px', background: isExpanded ? '#f8fafc' : '#fff', overflow: 'hidden' }}>
+      <div style={{ padding: '1rem 1.25rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem', flex: 1, cursor: 'pointer' }} onClick={onExpand}>
+          {isRunning ? <Loader2 className="animate-spin" size={22} color="#6366f1" /> :
+            result ? (result.passed ? <CheckCircle2 color="#10b981" size={22} /> : <XCircle color="#ef4444" size={22} />) :
+            <div style={{ width: '22px', height: '22px', borderRadius: '50%', border: '2px solid #e2e8f0' }} />}
+          <div>
+            <div style={{ fontWeight: 700, color: '#1e293b', fontSize: '1rem' }}>{tc.title}</div>
+            <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 500 }}>
+              {tc.steps.length} Actions •{' '}
+              {result ? (result.passed ? '✓ Passed' : '✗ Failed') : 'Pending'} •{' '}
+              <span style={{
+                background: tc.priority === 'high' ? '#fee2e2' : tc.priority === 'medium' ? '#fef3c7' : '#dcfce7',
+                color: tc.priority === 'high' ? '#dc2626' : tc.priority === 'medium' ? '#d97706' : '#16a34a',
+                fontWeight: 700, fontSize: '0.7rem', padding: '2px 8px', borderRadius: '6px', textTransform: 'uppercase', letterSpacing: '0.04em'
+              }}>{(tc.priority || 'high').toUpperCase()}</span>
+            </div>
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: '0.75rem' }}>
+          <button onClick={(e) => { e.stopPropagation(); onRun(tc); }} disabled={isProcessing}
+            style={{ padding: '8px', borderRadius: '8px', border: '1px solid #e2e8f0', background: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+            <Play size={16} style={{ color: '#0f172a' }} />
+          </button>
+          <button onClick={(e) => onRemove(e, tc.id)}
+            style={{ padding: '8px', borderRadius: '8px', border: '1px solid #fee2e2', background: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+            <Trash2 size={16} style={{ color: '#ef4444' }} />
+          </button>
+        </div>
+      </div>
+      {isExpanded && result && (
+        <div style={{ padding: '1.25rem', borderTop: '1px solid #e2e8f0', background: '#ffffff' }}>
+          {renderStepTrace(result.step_results || [])}
+          <SlideshowPanel screenshots={result.screenshots || []} isHeadfulOnly={isHeadfulOnly} videoBase64={result.video_base64} />
+        </div>
+      )}
+    </div>
+  );
+};
+
 export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clearSelectedTests }) => {
   const { applications, testCases, activeAppId, addExecutionRun } = useApp();
   const [nlCommand, setNlCommand] = useState('');
@@ -64,7 +189,21 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
   }, [selectedTestIdsForRun]);
 
   useEffect(() => { localStorage.setItem(stagedKey, JSON.stringify(stagedIds)); }, [stagedIds, stagedKey]);
-  useEffect(() => { sessionStorage.setItem(resultsKey, JSON.stringify(testResults)); }, [testResults, resultsKey]);
+
+  // Strip base64 screenshots before saving to sessionStorage — they're too large and crash storage
+  useEffect(() => {
+    try {
+      const stripped = Object.fromEntries(
+        Object.entries(testResults).map(([k, v]: [string, any]) => [
+          k,
+          { ...v, screenshots: [], video_base64: undefined }
+        ])
+      );
+      sessionStorage.setItem(resultsKey, JSON.stringify(stripped));
+    } catch {
+      // If still too large, skip persisting results
+    }
+  }, [testResults, resultsKey]);
 
   const stagedTests = stagedIds
     .map(id => testCases.find(tc => tc.id === id))
@@ -215,82 +354,7 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
     </div>
   );
 
-  const renderSlideshow = (screenshots: any[], isHeadfulOnly = false) => (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#475569', fontSize: '0.75rem', fontWeight: 800, letterSpacing: '0.05em' }}>
-        <ImageIcon size={14} /> VISUAL_CHRONOLOGY SLIDESHOW
-      </div>
-      <div style={{ display: 'flex', gap: '1rem', overflowX: 'auto', paddingBottom: '0.75rem' }}>
-        {isHeadfulOnly ? (
-          <p style={{ fontSize: '0.8rem', color: '#94a3b8', fontStyle: 'italic' }}>No checkpoints captured. (Interactive display targets execute completely live inside the headful desktop window frame).</p>
-        ) : !screenshots || screenshots.length === 0 ? (
-          <p style={{ fontSize: '0.8rem', color: '#94a3b8', fontStyle: 'italic' }}>No screenshots captured.</p>
-        ) : (
-          screenshots.map((s: any, i: number) => (
-            <div key={i} style={{ flexShrink: 0, width: '140px' }}>
-              <div style={{ position: 'relative', borderRadius: '8px', overflow: 'hidden', border: `2px solid ${s.status === 'passed' ? '#10b981' : '#ef4444'}`, cursor: 'zoom-in' }}
-                onClick={() => setLightboxImg(s.image_base64)}>
-                <img src={`data:image/png;base64,${s.image_base64}`} style={{ width: '100%', height: '85px', objectFit: 'cover' }} alt={`Step ${s.step_number}`} />
-                <div style={{ position: 'absolute', bottom: 4, right: 4, background: 'rgba(15,23,42,0.6)', borderRadius: '4px', padding: '2px' }}>
-                  <Maximize2 size={10} color="#fff" />
-                </div>
-              </div>
-              <div style={{ fontSize: '0.65rem', color: '#64748b', marginTop: '6px', fontWeight: 600 }}>Step {s.step_number}</div>
-              <div style={{ fontSize: '0.6rem', color: s.status === 'passed' ? '#10b981' : '#ef4444', fontWeight: 700 }}>{s.status?.toUpperCase()}</div>
-            </div>
-          ))
-        )}
-      </div>
-    </div>
-  );
 
-  const renderTestCard = (tc: any) => {
-    const result = testResults[tc.title];
-    const isExpanded = expandedId === tc.id;
-    const isRunning = processingId === tc.id;
-    const modeLabel = result?.mode === 'headful_single_with_screenshots' ? 'Headful (Live)' : result?.mode === 'headless_suite' ? 'Headless (Suite Timeline)' : 'Headful (Live)';
-    const isHeadfulOnly = result?.mode === 'headful_single' || (!result?.screenshots?.length && result?.mode !== 'headless_suite');
-
-    return (
-      <div key={tc.id} style={{ border: '1px solid #e2e8f0', borderRadius: '12px', background: isExpanded ? '#f8fafc' : '#fff', overflow: 'hidden' }}>
-        <div style={{ padding: '1rem 1.25rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem', flex: 1, cursor: 'pointer' }} onClick={() => setExpandedId(isExpanded ? null : tc.id)}>
-            {isRunning ? <Loader2 className="animate-spin" size={22} color="#6366f1" /> :
-              result ? (result.passed ? <CheckCircle2 color="#10b981" size={22} /> : <XCircle color="#ef4444" size={22} />) :
-              <div style={{ width: '22px', height: '22px', borderRadius: '50%', border: '2px solid #e2e8f0' }} />}
-            <div>
-              <div style={{ fontWeight: 700, color: '#1e293b', fontSize: '1rem' }}>{tc.title}</div>
-              <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 500 }}>
-                {tc.steps.length} Actions •{' '}
-                {result ? (result.passed ? '✓ Passed' : '✗ Failed') : 'Pending'} •{' '}
-                <span style={{ 
-                  background: tc.priority === 'high' ? '#fee2e2' : tc.priority === 'medium' ? '#fef3c7' : '#dcfce7',
-                  color: tc.priority === 'high' ? '#dc2626' : tc.priority === 'medium' ? '#d97706' : '#16a34a',
-                  fontWeight: 700, fontSize: '0.7rem', padding: '2px 8px', borderRadius: '6px', textTransform: 'uppercase', letterSpacing: '0.04em'
-                }}>{(tc.priority || 'high').toUpperCase()}</span>
-              </div>
-            </div>
-          </div>
-          <div style={{ display: 'flex', gap: '0.75rem' }}>
-            <button onClick={(e) => { e.stopPropagation(); handleSingleExecution(tc); }} disabled={isProcessing}
-              style={{ padding: '8px', borderRadius: '8px', border: '1px solid #e2e8f0', background: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
-              <Play size={16} style={{ color: '#0f172a' }} />
-            </button>
-            <button onClick={(e) => handleRemoveSingle(e, tc.id)}
-              style={{ padding: '8px', borderRadius: '8px', border: '1px solid #fee2e2', background: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
-              <Trash2 size={16} style={{ color: '#ef4444' }} />
-            </button>
-          </div>
-        </div>
-        {isExpanded && result && (
-          <div style={{ padding: '1.25rem', borderTop: '1px solid #e2e8f0', background: '#ffffff' }}>
-            {renderStepTrace(result.step_results || [])}
-            {renderSlideshow(result.screenshots || [], isHeadfulOnly)}
-          </div>
-        )}
-      </div>
-    );
-  };
 
   return (
     <div className="dashboard-view">
@@ -355,7 +419,7 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
               {expandedId === 'nl-adhoc-card' && (
                 <div style={{ padding: '1.25rem', borderTop: '1px solid #e2e8f0', background: '#ffffff' }}>
                   {renderStepTrace(testResults['NL Ad-hoc Script Engine Trace'].step_results || [])}
-                  {renderSlideshow(testResults['NL Ad-hoc Script Engine Trace'].screenshots || [], false)}
+                  {<SlideshowPanel screenshots={testResults['NL Ad-hoc Script Engine Trace'].screenshots || []} videoBase64={testResults['NL Ad-hoc Script Engine Trace'].video_base64} />}
                 </div>
               )}
             </div>
@@ -380,7 +444,20 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
                 </div>
                 {expandedSections[section] !== false && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1rem' }}>
-                    {(tests as any[]).map(tc => renderTestCard(tc))}
+                    {(tests as any[]).map(tc => (
+                    <TestCard
+                      key={tc.id}
+                      tc={tc}
+                      result={testResults[tc.title]}
+                      isExpanded={expandedId === tc.id}
+                      isRunning={processingId === tc.id}
+                      isProcessing={isProcessing}
+                      onExpand={() => setExpandedId(expandedId === tc.id ? null : tc.id)}
+                      onRun={handleSingleExecution}
+                      onRemove={handleRemoveSingle}
+                      renderStepTrace={renderStepTrace}
+                    />
+                  ))}
                   </div>
                 )}
               </div>
