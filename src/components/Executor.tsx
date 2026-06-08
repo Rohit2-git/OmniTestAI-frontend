@@ -263,7 +263,11 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
               <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 500 }}>
                 {tc.steps.length} Actions •{' '}
                 {result ? (result.passed ? '✓ Passed' : '✗ Failed') : 'Pending'} •{' '}
-                <span style={{ color: '#6366f1' }}>{result ? modeLabel : 'Headful (Live)'}</span>
+                <span style={{ 
+                  background: tc.priority === 'high' ? '#fee2e2' : tc.priority === 'medium' ? '#fef3c7' : '#dcfce7',
+                  color: tc.priority === 'high' ? '#dc2626' : tc.priority === 'medium' ? '#d97706' : '#16a34a',
+                  fontWeight: 700, fontSize: '0.7rem', padding: '2px 8px', borderRadius: '6px', textTransform: 'uppercase', letterSpacing: '0.04em'
+                }}>{(tc.priority || 'high').toUpperCase()}</span>
               </div>
             </div>
           </div>
