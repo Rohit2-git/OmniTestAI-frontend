@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+prisma
+pydantic
+google-genai
+pypdf
+python-docx
+python-dotenv
+python-multipart
+playwright
+stagehand
+pillow
