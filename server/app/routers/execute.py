@@ -66,8 +66,15 @@ async def execute_nl_test(payload: ExecuteNLRequest):
     try:
         result = await executor.execute_raw_steps(url=payload.url, steps=payload.steps)
         return {
-            "mode": "headless_nl", 
-            **result
+            "mode": "headful_nl_with_screenshots",
+            "url": payload.url,
+            "overall_status": "PASSED" if result.get("passed") else "FAILED",
+            "passed": result.get("passed"),
+            "total_steps": result.get("total_steps"),
+            "executed_steps": result.get("executed_steps"),
+            "step_results": result.get("step_results", []),
+            "screenshots": result.get("screenshots", []),
+            "video_base64": result.get("video_base64")
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -111,12 +118,14 @@ async def execute_single_direct(payload: DirectSingleRequest):
         capture_screenshots=False
     )
 
-    # Run 2 — headless immediately after, captures screenshots
+    # Run 2 — headless immediately after, captures screenshots + video
     headless_result = await run_test_case(
         test_case=test_case,
         base_url=payload.url,
         headful=False,
-        capture_screenshots=True
+        capture_screenshots=True,
+        # pyrefly: ignore [unexpected-keyword]
+        record_video=True
     )
 
     return {
@@ -128,7 +137,8 @@ async def execute_single_direct(payload: DirectSingleRequest):
         "total_steps": headful_result["total_steps"],
         "executed_steps": headful_result["executed_steps"],
         "step_results": headful_result["step_results"],
-        "screenshots": headless_result.get("screenshots", [])
+        "screenshots": headless_result.get("screenshots", []),
+        "video_base64": headless_result.get("video_base64")
     }
 
 
@@ -151,7 +161,9 @@ async def execute_suite_direct(payload: DirectSuiteRequest):
             test_case=test_case,
             base_url=payload.base_url,
             headful=False,
-            capture_screenshots=True
+            capture_screenshots=True,
+            # pyrefly: ignore [unexpected-keyword]
+            record_video=True
         )
         execution_results.append(result)
         if result["passed"]:
