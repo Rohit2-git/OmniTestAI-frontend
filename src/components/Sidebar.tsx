@@ -35,7 +35,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
     applications, 
     activeAppId, 
     setActiveAppId, 
-    addApplication
+    addApplication,
+    activeExecutionId,
+    isSuiteRunning,
+    isNLRunning
   } = useApp();
   
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -44,41 +47,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [newAppPlatform, setNewAppPlatform] = useState<'web' | 'mobile' | 'api'>('web');
   const [newAppUrl, setNewAppUrl] = useState('');
   
-  // Real-time task metrics tracker states
-  const [runningTasksCount, setRunningTasksCount] = useState(0);
-  const [localProcessing, setLocalProcessing] = useState(false);
+  // Execution status derived from global context — no polling needed
 
   const activeApp = applications.find(app => app.id === activeAppId);
 
-  // 🛠️ FAILSAFE HEARTBEAT: Listen for local script memory execution triggers alongside database polling
-  useEffect(() => {
-    // Check if the current browser window session tab cache has any active processing states
-    const checkLocalAndServerStatus = async () => {
-      // 1. Fetch live metrics directly from database counters
-      try {
-        const response = await fetch('http://localhost:8000/dashboard/metrics');
-        if (response.ok) {
-          const data = await response.json();
-          setRunningTasksCount(data.runningJobs || 0);
-        }
-      } catch (err) {
-        console.warn("Sidebar remote status sync timed out:", err);
-      }
-
-      // 2. Fallback check: Look at the visual UI spinners state to guarantee real-time updates
-      const hasActiveUiSpinners = document.querySelector('.animate-spin') !== null || 
-                                  document.querySelector('[class*="spinner"]') !== null;
-      setLocalProcessing(hasActiveUiSpinners);
-    };
-
-    // Fast-frequency sampling loop (checks every 800ms) to update perfectly during live runs
-    checkLocalAndServerStatus();
-    const interval = setInterval(checkLocalAndServerStatus, 800);
-    return () => clearInterval(interval);
-  }, []);
-
-  // Switches status if either backend reports an agent job OR frontend is animating a spinner card
-  const isCurrentlyExecuting = runningTasksCount > 0 || localProcessing;
+  // isCurrentlyExecuting — derived directly from global context, no polling
+  const isCurrentlyExecuting = isSuiteRunning || isNLRunning || activeExecutionId !== null;
 
   const handleOpenDialog = () => {
     setNewAppName('');

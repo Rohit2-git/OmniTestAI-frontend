@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
+import { saveScreenshots, loadAllScreenshotsForApp, clearScreenshotsForApp } from '../utils/screenshotStorage';
 import { 
   Play, Command, ListTodo, Trash2, CheckCircle2, 
   XCircle, Image as ImageIcon, Terminal as TerminalIcon, Maximize2, Loader2, Layers
@@ -12,9 +13,6 @@ interface ExecutorProps {
   clearSelectedTests: () => void;
   addToQueue?: (ids: string[]) => void;
 }
-
-
-// RESULTS_KEY is app-scoped — defined inside component
 
 const SlideshowPanel: React.FC<{ screenshots: any[]; isHeadfulOnly?: boolean; videoBase64?: string }> = ({
   screenshots, isHeadfulOnly = false, videoBase64
@@ -92,8 +90,6 @@ const SlideshowPanel: React.FC<{ screenshots: any[]; isHeadfulOnly?: boolean; vi
   );
 };
 
-// Extracted as proper React component — SlideshowPanel inside uses useState hooks
-// which cannot be called from a plain render function inside another component
 const TestCard: React.FC<{
   tc: any; result: any; isExpanded: boolean; isRunning: boolean; isProcessing: boolean;
   onExpand: () => void; onRun: (tc: any) => void; onRemove: (e: React.MouseEvent, id: string) => void;
@@ -142,37 +138,63 @@ const TestCard: React.FC<{
 };
 
 export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clearSelectedTests }) => {
-  const { applications, testCases, activeAppId, addExecutionRun } = useApp();
+  const { 
+    applications, testCases, activeAppId, addExecutionRun,
+    executionResults, setExecutionResults,
+    activeExecutionId, setActiveExecutionId,
+    isSuiteRunning, setIsSuiteRunning,
+    isNLRunning, setIsNLRunning
+  } = useApp();
   const [nlCommand, setNlCommand] = useState('');
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [processingId, setProcessingId] = useState<string | null>(null);
+  const processingId = activeExecutionId;
+  const setProcessingId = setActiveExecutionId;
+  const isProcessing = isSuiteRunning || isNLRunning || activeExecutionId !== null;
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
   const toggleSection = (section: string) => setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
   const [lightboxImg, setLightboxImg] = useState<string | null>(null);
 
   const stagedKey = `omnitest_staged_ids_${activeAppId || 'default'}`;
+  const [idbScreenshots, setIdbScreenshots] = useState<Record<string, { screenshots: any[]; videoBase64?: string }>>({});
+
+  useEffect(() => {
+    if (!activeAppId) return;
+    loadAllScreenshotsForApp(activeAppId).then(data => {
+      setIdbScreenshots(data);
+    });
+  }, [activeAppId]);
+
   const [stagedIds, setStagedIds] = useState<string[]>(() => {
     const key = `omnitest_staged_ids_${activeAppId || 'default'}`;
     const saved = localStorage.getItem(key);
     return saved ? JSON.parse(saved) : [];
   });
 
-  // Reload app-scoped staged queue and results when active app changes
   useEffect(() => {
     const savedStaged = localStorage.getItem(stagedKey);
     setStagedIds(savedStaged ? JSON.parse(savedStaged) : []);
-    const savedResults = sessionStorage.getItem(`omnitest_exec_results_${activeAppId || 'default'}`);
-    setTestResults(savedResults ? JSON.parse(savedResults) : {});
     setExpandedId(null);
   }, [activeAppId]);
 
-  const resultsKey = `omnitest_exec_results_${activeAppId || 'default'}`;
-  const [testResults, setTestResults] = useState<Record<string, any>>(() => {
-    const key = `omnitest_exec_results_${activeAppId || 'default'}`;
-    const saved = sessionStorage.getItem(key);
-    return saved ? JSON.parse(saved) : {};
-  });
+  const baseResults: Record<string, any> = executionResults[activeAppId || ''] || {};
+  const testResults: Record<string, any> = Object.fromEntries(
+    Object.entries(baseResults).map(([title, result]) => {
+      const stored = idbScreenshots[title];
+      if (stored && (!result.screenshots || result.screenshots.length === 0)) {
+        return [title, { ...result, screenshots: stored.screenshots, video_base_64: stored.videoBase64 }];
+      }
+      return [title, result];
+    })
+  );
+  
+  const setTestResults = (updater: any) => {
+    setExecutionResults(prev => {
+      const appKey = activeAppId || '';
+      const current = prev[appKey] || {};
+      const next = typeof updater === 'function' ? updater(current) : updater;
+      return { ...prev, [appKey]: next };
+    });
+  };
 
   const activeApp = applications.find(app => app.id === activeAppId);
 
@@ -190,21 +212,6 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
 
   useEffect(() => { localStorage.setItem(stagedKey, JSON.stringify(stagedIds)); }, [stagedIds, stagedKey]);
 
-  // Strip base64 screenshots before saving to sessionStorage — they're too large and crash storage
-  useEffect(() => {
-    try {
-      const stripped = Object.fromEntries(
-        Object.entries(testResults).map(([k, v]: [string, any]) => [
-          k,
-          { ...v, screenshots: [], video_base64: undefined }
-        ])
-      );
-      sessionStorage.setItem(resultsKey, JSON.stringify(stripped));
-    } catch {
-      // If still too large, skip persisting results
-    }
-  }, [testResults, resultsKey]);
-
   const stagedTests = stagedIds
     .map(id => testCases.find(tc => tc.id === id))
     .filter(Boolean)
@@ -217,7 +224,6 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
     return acc;
   }, {});
 
-  // Helper to save execution run to AppContext history
   const saveToHistory = (data: any, mode: string, testCaseIds: string[], nlInstruction?: string, startTime?: number) => {
     if (!activeAppId) return;
     const durationMs = startTime ? Date.now() - startTime : 0;
@@ -250,8 +256,14 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
     setTestResults({});
     setExpandedId(null);
     setStagedIds([]);
-    sessionStorage.removeItem(resultsKey);
+    setIdbScreenshots({});
     localStorage.removeItem(stagedKey);
+    if (activeAppId) clearScreenshotsForApp(activeAppId);
+    setExecutionResults(prev => {
+      const next = { ...prev };
+      delete next[activeAppId || ''];
+      return next;
+    });
     clearSelectedTests();
   };
 
@@ -262,7 +274,7 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
 
   const handleSingleExecution = async (tc: any) => {
     if (!activeApp?.url) return;
-    setIsProcessing(true);
+    setIsSuiteRunning(true);
     setProcessingId(tc.id);
     setExpandedId(tc.id);
     const startTime = Date.now();
@@ -275,18 +287,22 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
       });
       const data = await res.json();
       setTestResults(prev => ({ ...prev, [tc.title]: data }));
+      if (activeAppId) {
+        await saveScreenshots(activeAppId, tc.title, data.screenshots || [], data.video_base64);
+        setIdbScreenshots(prev => ({ ...prev, [tc.title]: { screenshots: data.screenshots || [], videoBase64: data.video_base64 } }));
+      }
       saveToHistory(data, 'headful_single', [tc.id], tc.title, startTime);
     } catch (err) {
       console.error('Single execution error:', err);
     } finally {
-      setIsProcessing(false);
+      setIsSuiteRunning(false);
       setProcessingId(null);
     }
   };
 
   const handleBulkExecution = async () => {
     if (!activeApp?.url || stagedTests.length === 0) return;
-    setIsProcessing(true);
+    setIsSuiteRunning(true);
     const startTime = Date.now();
     try {
       const testCasesPayload = stagedTests.map(tc => ({
@@ -306,17 +322,41 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
         data.results.forEach((r: any) => { resultMap[r.title] = r; });
       }
       setTestResults(prev => ({ ...prev, ...resultMap }));
+      if (activeAppId && data?.results) {
+        const idbUpdates: Record<string, any> = {};
+        for (const r of data.results) {
+          await saveScreenshots(activeAppId, r.title, r.screenshots || [], r.video_base64);
+          idbUpdates[r.title] = { screenshots: r.screenshots || [], videoBase64: r.video_base64 };
+        }
+        setIdbScreenshots(prev => ({ ...prev, ...idbUpdates }));
+      }
       saveToHistory(data, 'headless_suite', stagedTests.map(tc => tc.id), undefined, startTime);
     } catch (err) {
       console.error('Suite execution error:', err);
     } finally {
-      setIsProcessing(false);
+      setIsSuiteRunning(false);
+    }
+  };
+
+  // INTERRUPT EXECUTION HOOK: Immediately notifies backend loop worker to abort
+  const handleStopSuiteExecution = async () => {
+    if (!activeApp?.url) return;
+    try {
+      await fetch(`${API_BASE}/execute/stop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ base_url: activeApp.url })
+      });
+    } catch (err) {
+      console.error('Failed to dispatch thread cancellation signal:', err);
+    } finally {
+      setIsSuiteRunning(false);
     }
   };
 
   const handleNLExecution = async () => {
     if (!nlCommand.trim() || !activeApp?.url) return;
-    setIsProcessing(true);
+    setIsSuiteRunning(true);
     const startTime = Date.now();
     try {
       const steps = nlCommand.split(/[\n;]+/).map(s => s.trim()).filter(Boolean);
@@ -328,11 +368,15 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
       const data = await res.json();
       setTestResults(prev => ({ ...prev, ['NL Ad-hoc Script Engine Trace']: data }));
       setExpandedId('nl-adhoc-card');
+      if (activeAppId) {
+        await saveScreenshots(activeAppId, 'NL Ad-hoc Script Engine Trace', data.screenshots || [], data.video_base64);
+        setIdbScreenshots(prev => ({ ...prev, ['NL Ad-hoc Script Engine Trace']: { screenshots: data.screenshots || [], videoBase64: data.video_base64 } }));
+      }
       saveToHistory(data, 'headful_nl', [], nlCommand, startTime);
     } catch (err) {
       console.error('NL execution error:', err);
     } finally {
-      setIsProcessing(false);
+      setIsSuiteRunning(false);
     }
   };
 
@@ -353,8 +397,6 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
       </div>
     </div>
   );
-
-
 
   return (
     <div className="dashboard-view">
@@ -391,8 +433,37 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
               Staged Suite Queue ({stagedTests.length})
             </span>
           </div>
-          <div style={{ display: 'flex', gap: '0.75rem' }}>
+          
+          {/* ACTION TOOLBAR BOX - Outlined cancel button placed precisely right beside Run Suite button */}
+          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
             <button onClick={handleClearAll} style={{ background: '#f1f5f9', color: '#475569', border: 'none', padding: '8px 16px', borderRadius: '8px', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer' }}>Clear All</button>
+            
+            {isSuiteRunning && (
+              <button 
+                type="button"
+                onClick={handleStopSuiteExecution}
+                style={{ 
+                  background: '#fff1f2', 
+                  border: '1px solid #fecdd3', 
+                  color: '#e11d48', 
+                  padding: '8px 16px', 
+                  borderRadius: '8px', 
+                  fontWeight: 700, 
+                  fontSize: '0.85rem', 
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.4rem',
+                  transition: 'background 0.2s'
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.background = '#ffe4e6'}
+                onMouseLeave={(e) => e.currentTarget.style.background = '#fff1f2'}
+              >
+                <XCircle size={15} />
+                <span>Stop Execution</span>
+              </button>
+            )}
+
             <button onClick={handleBulkExecution} disabled={isProcessing || stagedTests.length === 0}
               style={{ background: '#0f172a', color: '#fff', display: 'flex', alignItems: 'center', gap: '0.6rem', padding: '8px 20px', borderRadius: '8px', fontWeight: 700, border: 'none', cursor: 'pointer' }}>
               {isProcessing && !processingId ? <Loader2 className="animate-spin" size={16} /> : null}
@@ -402,7 +473,6 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-          {/* NL Result */}
           {testResults['NL Ad-hoc Script Engine Trace'] && (
             <div style={{ border: '1px solid #06b6d4', borderRadius: '12px', background: '#f0fdfa', overflow: 'hidden' }}>
               <div style={{ padding: '1rem 1.25rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
@@ -425,7 +495,6 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
             </div>
           )}
 
-          {/* Grouped test cases */}
           {stagedTests.length === 0 ? (
             <div style={{ textAlign: 'center', padding: '4rem 0', color: '#94a3b8' }}>
               <Layers size={40} style={{ opacity: 0.2, marginBottom: '1rem' }} />
@@ -466,7 +535,6 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
         </div>
       </div>
 
-      {/* LIGHTBOX */}
       {lightboxImg && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(2,6,23,0.85)', backdropFilter: 'blur(4px)', zIndex: 3000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}
           onClick={() => setLightboxImg(null)}>

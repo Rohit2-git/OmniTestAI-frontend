@@ -21,6 +21,16 @@ interface AppContextType {
   // Persistent generation studio history cache
   generationBatches: any[];
   setGenerationBatches: React.Dispatch<React.SetStateAction<any[]>>;
+  // Execution results — keyed by appId, persisted to localStorage including screenshots
+  executionResults: Record<string, Record<string, any>>;
+  setExecutionResults: React.Dispatch<React.SetStateAction<Record<string, Record<string, any>>>>;
+  // Active execution tracking
+  activeExecutionId: string | null;
+  setActiveExecutionId: React.Dispatch<React.SetStateAction<string | null>>;
+  isSuiteRunning: boolean;
+  setIsSuiteRunning: React.Dispatch<React.SetStateAction<boolean>>;
+  isNLRunning: boolean;
+  setIsNLRunning: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -58,6 +68,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return saved ? JSON.parse(saved) : [];
   });
 
+  // Execution results — persisted to localStorage so screenshots survive reload
+  const [executionResults, setExecutionResults] = useState<Record<string, Record<string, any>>>(() => {
+    try {
+      const saved = localStorage.getItem('ai_agent_execution_results');
+      return saved ? JSON.parse(saved) : {};
+    } catch { return {}; }
+  });
+
+  // Active execution tracking state
+  const [activeExecutionId, setActiveExecutionId] = useState<string | null>(null);
+  const [isSuiteRunning, setIsSuiteRunning] = useState(false);
+  const [isNLRunning, setIsNLRunning] = useState(false);
+
   useEffect(() => { localStorage.setItem('ai_agent_applications', JSON.stringify(applications)); }, [applications]);
   useEffect(() => { localStorage.setItem('ai_agent_testcases', JSON.stringify(testCases)); }, [testCases]);
   useEffect(() => { localStorage.setItem('ai_agent_history', JSON.stringify(history)); }, [history]);
@@ -68,6 +91,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     localStorage.setItem('ai_agent_temp_batches', JSON.stringify(generationBatches));
   }, [generationBatches]);
+
+  // Persist execution results — save with screenshots to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem('ai_agent_execution_results', JSON.stringify(executionResults));
+    } catch {
+      // If too large (many screenshots), store without screenshots as fallback
+      try {
+        const stripped = Object.fromEntries(
+          Object.entries(executionResults).map(([appId, results]) => [
+            appId,
+            Object.fromEntries(
+              Object.entries(results as Record<string, any>).map(([title, r]: [string, any]) => [
+                title, { ...r, screenshots: [], video_base64: undefined }
+              ])
+            )
+          ])
+        );
+        localStorage.setItem('ai_agent_execution_results', JSON.stringify(stripped));
+      } catch { /* skip */ }
+    }
+  }, [executionResults]);
 
   const addApplication = (appData: Omit<Application, 'id' | 'createdAt'>) => {
     const newApp: Application = { ...appData, id: `app-${Date.now()}`, createdAt: new Date().toISOString() };
@@ -130,7 +175,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       applications, testCases, history, knowledgeAssets, activeAppId, setActiveAppId,
       addApplication, updateApplication, deleteApplication, addTestCase, updateTestCase,
       deleteTestCase, addExecutionRun, addKnowledgeAsset, deleteKnowledgeAsset,
-      generationBatches, setGenerationBatches
+      generationBatches, setGenerationBatches,
+      executionResults, setExecutionResults,
+      activeExecutionId, setActiveExecutionId,
+      isSuiteRunning, setIsSuiteRunning,
+      isNLRunning, setIsNLRunning
     }}>
       {children}
     </AppContext.Provider>
@@ -141,4 +190,4 @@ export const useApp = () => {
   const context = useContext(AppContext);
   if (!context) throw new Error('useApp must be used within an AppProvider');
   return context;
-};
+};// PATCH — this is appended; see str_replace below to insert properly
