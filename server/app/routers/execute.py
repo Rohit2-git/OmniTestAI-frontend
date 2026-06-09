@@ -1,15 +1,16 @@
 import json
 import os
-# pyrefly: ignore [missing-import]
-from fastapi import APIRouter, HTTPException
-# pyrefly: ignore [missing-import]
-from pydantic import BaseModel
-from typing import List
+from fastapi import APIRouter, HTTPException # type: ignore
+from pydantic import BaseModel # type: ignore
+from typing import List, Set
 from app.database import db
 from app.executors.web import WebExecutor
 from app.executors.nl_executor import NLExecutor
 
 router = APIRouter(prefix="/execute", tags=["execute"])
+
+# Thread-safe in-memory global state cache to track operational abort triggers
+ACTIVE_CANCELLATIONS: Set[str] = set()
 
 class ExecuteRequest(BaseModel):
     run_id: int
@@ -18,6 +19,16 @@ class ExecuteRequest(BaseModel):
 class ExecuteNLRequest(BaseModel):
     url: str
     steps: List[str]
+
+class StopSuiteRequest(BaseModel):
+    base_url: str
+
+
+@router.post("/stop")
+async def abort_suite_execution(payload: StopSuiteRequest):
+    """Registers an asynchronous cancellation token to gracefully terminate active loops."""
+    ACTIVE_CANCELLATIONS.add(payload.base_url)
+    return {"status": "success", "message": f"Cancellation registered for {payload.base_url}"}
 
 
 @router.post("/")
@@ -79,8 +90,6 @@ async def execute_nl_test(payload: ExecuteNLRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ADD THESE TO THE BOTTOM OF app/routers/execute.py
-# (after the existing /nl endpoint)
 
 class DirectTestCase(BaseModel):
     title: str
@@ -110,7 +119,6 @@ async def execute_single_direct(payload: DirectSingleRequest):
         "type": "single"
     }
 
-    # Run 1 — headful, user watches live
     headful_result = await run_test_case(
         test_case=test_case,
         base_url=payload.url,
@@ -118,13 +126,11 @@ async def execute_single_direct(payload: DirectSingleRequest):
         capture_screenshots=False
     )
 
-    # Run 2 — headless immediately after, captures screenshots + video
     headless_result = await run_test_case(
         test_case=test_case,
         base_url=payload.url,
         headful=False,
         capture_screenshots=True,
-        # pyrefly: ignore [unexpected-keyword]
         record_video=True
     )
 
@@ -144,28 +150,50 @@ async def execute_single_direct(payload: DirectSingleRequest):
 
 @router.post("/suite")
 async def execute_suite_direct(payload: DirectSuiteRequest):
-    """SUITE RUN - headless + screenshots - direct payload no run_id needed."""
+    """SUITE RUN - headless + screenshots - direct payload no run_id needed with early cancellation breakout."""
     from app.executors.playwright import run_test_case
+    
+    # Reset any persistent old cancellation tokens matching this base target route environment profile URL
+    if payload.base_url in ACTIVE_CANCELLATIONS:
+        ACTIVE_CANCELLATIONS.remove(payload.base_url)
+
     execution_results = []
     total_passed = 0
     total_failed = 0
+    was_aborted = False
 
     for tc in payload.test_cases:
+        # Check cancellation token context before spawning a fresh browser target runner context thread loop
+        if payload.base_url in ACTIVE_CANCELLATIONS:
+            was_aborted = True
+            break
+
         test_case = {
             "title": tc.title,
             "steps": tc.steps,
             "expected_result": tc.expected_result,
             "type": tc.type
         }
+        
         result = await run_test_case(
             test_case=test_case,
             base_url=payload.base_url,
             headful=False,
             capture_screenshots=True,
-            # pyrefly: ignore [unexpected-keyword]
             record_video=True
         )
+        
         execution_results.append(result)
+        
+        # Check cancellation state immediately after test execution routine concludes
+        if payload.base_url in ACTIVE_CANCELLATIONS:
+            if result["passed"]:
+                total_passed += 1
+            else:
+                total_failed += 1
+            was_aborted = True
+            break
+
         if result["passed"]:
             total_passed += 1
         else:
@@ -183,6 +211,6 @@ async def execute_suite_direct(payload: DirectSuiteRequest):
             "failed": total_failed,
             "not_run": len(payload.test_cases) - ran
         },
-        "stopped_early": total_failed > 0,
+        "stopped_early": (total_failed > 0) or was_aborted,
         "results": execution_results
     }
