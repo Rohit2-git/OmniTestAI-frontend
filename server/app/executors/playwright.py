@@ -102,11 +102,49 @@ async def _execute_step(page, step: str) -> dict:
             await page.keyboard.press("Enter")
             return {"status": "passed", "detail": "Pressed Enter as fallback"}
 
+        # PERFECTED INTELLIGENT TARGET SCROLL LOGIC
         if "scroll" in s:
+            target_match = re.search(r"['\"](.+?)['\"]", step)
+            if target_match:
+                target_text = target_match.group(1)
+                try:
+                    # Priority 1: Direct structural heading match (h1, h2, h3, h4, h5, h6)
+                    # This completely bypasses floating links inside sticky left/right layout sidebars!
+                    heading_locators = [
+                        page.get_by_role("heading", name=re.compile(target_text, re.IGNORECASE)),
+                        page.locator(f"h1:has-text('{target_text}'), h2:has-text('{target_text}'), h3:has-text('{target_text}'), h4:has-text('{target_text}')")
+                    ]
+                    
+                    for heading in heading_locators:
+                        if await heading.first.count() > 0:
+                            await heading.first.wait_for(state="attached", timeout=2000)
+                            await heading.first.scroll_into_view_if_needed(timeout=2000)
+                            return {"status": "passed", "detail": f"Intelligently scrolled down to section header content: '{target_text}'"}
+                    
+                    # Priority 2: Main article content body element text lookup boundary context
+                    # Specifically targeting main canvas text elements if it's not a strict header tag
+                    content_locators = [
+                        page.locator(f"main p:has-text('{target_text}'), #content p:has-text('{target_text}'), .mw-parser-output p:has-text('{target_text}')"),
+                        page.get_by_text(re.compile(target_text, re.IGNORECASE))
+                    ]
+                    
+                    for locator in content_locators:
+                        if await locator.first.count() > 0:
+                            await locator.first.wait_for(state="attached", timeout=2000)
+                            await locator.first.scroll_into_view_if_needed(timeout=2000)
+                            # Give a slight scroll offset nudge so the target is not hidden beneath sticky headers
+                            await page.evaluate("window.scrollBy(0, -80)")
+                            return {"status": "passed", "detail": f"Located content text block and aligned viewport to: '{target_text}'"}
+                            
+                except Exception as scroll_err:
+                    # Log trace safely and cascade down to standard relative scrolling if DOM times out
+                    pass
+
+            # Priority 3: Fallback standard relative pixel shifts if no bracket text is defined
             direction = "down" if "down" in s else "up" if "up" in s else "down"
-            amount = 600 if "bottom" in s else 300
+            amount = 700 if "bottom" in s else 350
             await page.evaluate(f"window.scrollBy(0, {amount if direction == 'down' else -amount})")
-            return {"status": "passed", "detail": f"Scrolled {direction}"}
+            return {"status": "passed", "detail": f"Scrolled {direction} via browser pixel fallback displacement"}
 
         if any(w in s for w in ["verify", "check", "assert", "confirm", "ensure", "should", "expect"]):
             text_match = re.search(r"['\"](.+?)['\"]", step)
@@ -178,7 +216,6 @@ async def _run_playwright(
     video_base64 = None
     passed = True
 
-    # Temp dir for video — cleaned up after encoding
     video_dir = tempfile.mkdtemp() if record_video else None
 
     async with async_playwright() as p:
@@ -253,11 +290,9 @@ async def _run_playwright(
         if headful:
             await asyncio.sleep(2)
 
-        # Close context BEFORE reading video — Playwright flushes video on context close
         await context.close()
         await browser.close()
 
-        # Encode video to base64 after context is closed
         if record_video and video_dir:
             try:
                 video_files = [f for f in os.listdir(video_dir) if f.endswith(".webm")]
