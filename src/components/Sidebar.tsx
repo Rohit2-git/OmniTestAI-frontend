@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { 
   LayoutDashboard, 
@@ -43,8 +43,42 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [newAppDesc, setNewAppDesc] = useState('');
   const [newAppPlatform, setNewAppPlatform] = useState<'web' | 'mobile' | 'api'>('web');
   const [newAppUrl, setNewAppUrl] = useState('');
+  
+  // Real-time task metrics tracker states
+  const [runningTasksCount, setRunningTasksCount] = useState(0);
+  const [localProcessing, setLocalProcessing] = useState(false);
 
   const activeApp = applications.find(app => app.id === activeAppId);
+
+  // 🛠️ FAILSAFE HEARTBEAT: Listen for local script memory execution triggers alongside database polling
+  useEffect(() => {
+    // Check if the current browser window session tab cache has any active processing states
+    const checkLocalAndServerStatus = async () => {
+      // 1. Fetch live metrics directly from database counters
+      try {
+        const response = await fetch('http://localhost:8000/dashboard/metrics');
+        if (response.ok) {
+          const data = await response.json();
+          setRunningTasksCount(data.runningJobs || 0);
+        }
+      } catch (err) {
+        console.warn("Sidebar remote status sync timed out:", err);
+      }
+
+      // 2. Fallback check: Look at the visual UI spinners state to guarantee real-time updates
+      const hasActiveUiSpinners = document.querySelector('.animate-spin') !== null || 
+                                  document.querySelector('[class*="spinner"]') !== null;
+      setLocalProcessing(hasActiveUiSpinners);
+    };
+
+    // Fast-frequency sampling loop (checks every 800ms) to update perfectly during live runs
+    checkLocalAndServerStatus();
+    const interval = setInterval(checkLocalAndServerStatus, 800);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Switches status if either backend reports an agent job OR frontend is animating a spinner card
+  const isCurrentlyExecuting = runningTasksCount > 0 || localProcessing;
 
   const handleOpenDialog = () => {
     setNewAppName('');
@@ -58,7 +92,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
     dialogRef.current?.close();
   };
 
-  // Close when clicking backdrop (light dismiss)
   const handleBackdropClick = (e: React.MouseEvent<HTMLDialogElement>) => {
     if (e.target === dialogRef.current) {
       handleCloseDialog();
@@ -188,10 +221,31 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </ul>
       </nav>
 
-      {/* Sidebar Footer info */}
-      <div className="sidebar-footer">
-        <span className="agent-status-pulse"></span>
-        <span className="agent-status-text">Agent Core v1.4.2 (Idle)</span>
+      {/* FIXED DYNAMIC SIDEBAR FOOTER STATUS */}
+      <div className="sidebar-footer" style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '1rem 1.5rem', background: 'transparent' }}>
+        <span 
+          className="agent-status-pulse" 
+          style={{ 
+            width: '8px', 
+            height: '8px', 
+            borderRadius: '50%', 
+            background: isCurrentlyExecuting ? '#ef4444' : '#10b981',
+            boxShadow: isCurrentlyExecuting ? '0 0 10px #ef4444' : '0 0 10px #10b981',
+            animation: 'pulse 2s infinite',
+            transition: 'background 0.3s ease, box-shadow 0.3s ease'
+          }}
+        ></span>
+        <span 
+          className="agent-status-text" 
+          style={{ 
+            fontSize: '0.8rem', 
+            fontWeight: 700, 
+            color: isCurrentlyExecuting ? '#ef4444' : '#94a3b8',
+            transition: 'color 0.3s ease'
+          }}
+        >
+          {isCurrentlyExecuting ? 'OmniTestAI (In Progress)' : 'OmniTestAI (Idle)'}
+        </span>
       </div>
 
       {/* Add New App Native Dialog Modal */}
