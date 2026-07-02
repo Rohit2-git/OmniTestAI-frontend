@@ -190,6 +190,7 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
   const [lightboxImg, setLightboxImg] = useState<string | null>(null);
   const [showRunDropdown, setShowRunDropdown] = useState(false);
   const [showClearDropdown, setShowClearDropdown] = useState(false);
+  const executionAbortRef = React.useRef<AbortController | null>(null);
 
   const stagedKey = `omnitest_staged_ids_${activeAppId || 'default'}`;
   // Renamed from idbScreenshots: this now comes from the real database via
@@ -262,6 +263,31 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
 
     loadFromDb();
   }, [activeAppId]);
+
+  const [completedExecutions, setCompletedExecutions] = useState<any[]>([]);
+  const [completedLoading, setCompletedLoading] = useState(false);
+
+  // QA Reviewer: fetch deduplicated completed executions from the new endpoint
+  useEffect(() => {
+    if (!isReadOnly || !activeAppId) return;
+    const fetchCompleted = async () => {
+      setCompletedLoading(true);
+      try {
+        const res = await fetch(
+          `${API_BASE}/results/executions/completed?app_id=${activeAppId}`,
+          { credentials: 'include' }
+        );
+        if (!res.ok) return;
+        const data = await res.json();
+        setCompletedExecutions(data.results || []);
+      } catch (e) {
+        console.error('Failed to load completed executions:', e);
+      } finally {
+        setCompletedLoading(false);
+      }
+    };
+    fetchCompleted();
+  }, [activeAppId, isReadOnly]);
 
   const [stagedIds, setStagedIds] = useState<string[]>(() => {
     const key = `omnitest_staged_ids_${activeAppId || 'default'}`;
@@ -444,6 +470,8 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
 
   const handleSingleExecution = async (tc: any) => {
     if (!activeApp?.url) return;
+    const abortController = new AbortController();
+    executionAbortRef.current = abortController;
     setIsSuiteRunning(true);
     setProcessingId(tc.id);
     setExpandedId(tc.id);
@@ -453,19 +481,19 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
       const res = await fetch(`${API_BASE}/execute/single`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: activeApp.url, steps, title: tc.title, expected_result: tc.steps[tc.steps.length - 1]?.expected || '', appId: activeAppId })
+        body: JSON.stringify({ url: activeApp.url, steps, title: tc.title, expected_result: tc.steps[tc.steps.length - 1]?.expected || '', appId: activeAppId }),
+        signal: abortController.signal
       });
       const data = await res.json();
       setTestResults(prev => ({ ...prev, [tc.title]: data }));
       if (activeAppId) {
-        // Backend already persisted this to the DB (results.py) — just mirror
-        // it into local state so it shows immediately without a refetch.
         setDbExecutionResults(prev => ({ ...prev, [tc.title]: { screenshots: data.screenshots || [], videoBase64: data.video_base64, videoPath: data.video_path } }));
       }
       saveToHistory(data, 'headful_single', [tc.id], tc.title, startTime);
-    } catch (err) {
-      console.error('Single execution error:', err);
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') console.error('Single execution error:', err);
     } finally {
+      executionAbortRef.current = null;
       setIsSuiteRunning(false);
       setProcessingId(null);
     }
@@ -473,6 +501,8 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
 
   const handleBulkExecution = async () => {
     if (!activeApp?.url || stagedTests.length === 0) return;
+    const abortController = new AbortController();
+    executionAbortRef.current = abortController;
     setIsSuiteRunning(true);
     const startTime = Date.now();
     try {
@@ -485,27 +515,31 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
       const res = await fetch(`${API_BASE}/execute/suite`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ base_url: activeApp.url, test_cases: testCasesPayload, appId: activeAppId })
+        body: JSON.stringify({ base_url: activeApp.url, test_cases: testCasesPayload, appId: activeAppId }),
+        signal: abortController.signal
       });
       const data = await res.json();
-      const resultMap: Record<string, any> = {};
-      if (data?.results) {
-        data.results.forEach((r: any) => { resultMap[r.title] = r; });
-      }
-      setTestResults(prev => ({ ...prev, ...resultMap }));
-      if (activeAppId && data?.results) {
-        // Backend already persisted each result to the DB — mirror into
-        // local state so it shows immediately without a refetch.
-        const dbUpdates: Record<string, any> = {};
-        for (const r of data.results) {
-          dbUpdates[r.title] = { screenshots: r.screenshots || [], videoBase64: r.video_base64, videoPath: r.video_path };
+      // If the backend reports the run was aborted and cleaned up, don't
+      // store any partial results — the DB rows and files are already gone.
+      if (!data?.aborted) {
+        const resultMap: Record<string, any> = {};
+        if (data?.results) {
+          data.results.forEach((r: any) => { resultMap[r.title] = r; });
         }
-        setDbExecutionResults(prev => ({ ...prev, ...dbUpdates }));
+        setTestResults(prev => ({ ...prev, ...resultMap }));
+        if (activeAppId && data?.results) {
+          const dbUpdates: Record<string, any> = {};
+          for (const r of data.results) {
+            dbUpdates[r.title] = { screenshots: r.screenshots || [], videoBase64: r.video_base64, videoPath: r.video_path };
+          }
+          setDbExecutionResults(prev => ({ ...prev, ...dbUpdates }));
+        }
+        saveToHistory(data, 'headless_suite', stagedTests.map(tc => tc.id), undefined, startTime);
       }
-      saveToHistory(data, 'headless_suite', stagedTests.map(tc => tc.id), undefined, startTime);
-    } catch (err) {
-      console.error('Suite execution error:', err);
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') console.error('Suite execution error:', err);
     } finally {
+      executionAbortRef.current = null;
       setIsSuiteRunning(false);
     }
   };
@@ -515,6 +549,8 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
     if (!activeApp?.url) return;
     const sectionTests = groupedTests[section] || [];
     if (sectionTests.length === 0) return;
+    const abortController = new AbortController();
+    executionAbortRef.current = abortController;
     setIsSuiteRunning(true);
     const startTime = Date.now();
     try {
@@ -527,25 +563,29 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
       const res = await fetch(`${API_BASE}/execute/suite`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ base_url: activeApp.url, test_cases: testCasesPayload, appId: activeAppId })
+        body: JSON.stringify({ base_url: activeApp.url, test_cases: testCasesPayload, appId: activeAppId }),
+        signal: abortController.signal
       });
       const data = await res.json();
-      const resultMap: Record<string, any> = {};
-      if (data?.results) {
-        data.results.forEach((r: any) => { resultMap[r.title] = r; });
-      }
-      setTestResults((prev: any) => ({ ...prev, ...resultMap }));
-      if (activeAppId && data?.results) {
-        const dbUpdates: Record<string, any> = {};
-        for (const r of data.results) {
-          dbUpdates[r.title] = { screenshots: r.screenshots || [], videoBase64: r.video_base64, videoPath: r.video_path };
+      if (!data?.aborted) {
+        const resultMap: Record<string, any> = {};
+        if (data?.results) {
+          data.results.forEach((r: any) => { resultMap[r.title] = r; });
         }
-        setDbExecutionResults(prev => ({ ...prev, ...dbUpdates }));
+        setTestResults((prev: any) => ({ ...prev, ...resultMap }));
+        if (activeAppId && data?.results) {
+          const dbUpdates: Record<string, any> = {};
+          for (const r of data.results) {
+            dbUpdates[r.title] = { screenshots: r.screenshots || [], videoBase64: r.video_base64, videoPath: r.video_path };
+          }
+          setDbExecutionResults(prev => ({ ...prev, ...dbUpdates }));
+        }
+        saveToHistory(data, 'headless_suite', sectionTests.map((tc: any) => tc.id), undefined, startTime);
       }
-      saveToHistory(data, 'headless_suite', sectionTests.map((tc: any) => tc.id), undefined, startTime);
-    } catch (err) {
-      console.error('Section execution error:', err);
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') console.error('Section execution error:', err);
     } finally {
+      executionAbortRef.current = null;
       setIsSuiteRunning(false);
     }
   };
@@ -581,6 +621,15 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
   };
 
   const handleStopSuiteExecution = async () => {
+    // 1. Abort the in-flight fetch immediately — this unblocks the frontend right away.
+    if (executionAbortRef.current) {
+      executionAbortRef.current.abort();
+      executionAbortRef.current = null;
+    }
+    setIsSuiteRunning(false);
+    setProcessingId(null);
+    // 2. Also tell the backend to stop — so the Playwright process halts between steps
+    //    and doesn't keep running headlessly in the background after the fetch was aborted.
     if (!activeApp?.url) return;
     try {
       await fetch(`${API_BASE}/execute/stop`, {
@@ -589,9 +638,7 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
         body: JSON.stringify({ base_url: activeApp.url })
       });
     } catch (err) {
-      console.error('Failed to dispatch thread cancellation signal:', err);
-    } finally {
-      setIsSuiteRunning(false);
+      console.error('Failed to dispatch backend cancellation signal:', err);
     }
   };
 
@@ -729,13 +776,13 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
         )}
       </div>
 
-      {/* QUEUE */}
+      {/* QUEUE / COMPLETED EXECUTIONS PANEL */}
       <div className="glass-card" style={{ background: '#ffffff', borderRadius: '16px', border: '1px solid #e2e8f0', padding: '1.5rem', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.05)' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <ListTodo size={18} color="#6366f1" />
+            <ListTodo size={18} color={isReadOnly ? '#0891b2' : '#6366f1'} />
             <span style={{ fontSize: '0.8rem', fontWeight: 800, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Staged Suite Queue ({stagedTests.length})
+              {isReadOnly ? `Completed Executions (${completedExecutions.length})` : `Staged Suite Queue (${stagedTests.length})`}
             </span>
           </div>
           
@@ -848,6 +895,94 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
           </div>
         </div>
 
+        {/* ── QA REVIEWER: read-only completed executions panel ───────────── */}
+        {isReadOnly ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            {completedLoading ? (
+              <div style={{ textAlign: 'center', padding: '4rem 0', color: '#94a3b8' }}>
+                <Loader2 className="animate-spin" size={28} style={{ opacity: 0.4, marginBottom: '1rem' }} />
+                <p style={{ fontWeight: 500 }}>Loading execution results…</p>
+              </div>
+            ) : completedExecutions.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '4rem 0', color: '#94a3b8' }}>
+                <Layers size={40} style={{ opacity: 0.2, marginBottom: '1rem' }} />
+                <p style={{ fontWeight: 500 }}>No executions found for this application yet.</p>
+                <p style={{ fontSize: '0.8rem', marginTop: '0.5rem', opacity: 0.7 }}>Results will appear here once tests have been run by a QA Engineer or Admin.</p>
+              </div>
+            ) : (
+              completedExecutions.map((r: any) => {
+                const cardId = `completed-${r.execution_result_id}`;
+                const isExpanded = expandedId === cardId;
+                const screenshots = (r.step_results || [])
+                  .filter((s: any) => s.image_path || s.image_base64)
+                  .map((s: any) => ({
+                    step_number: s.step_number,
+                    step: s.step || s.detail || '',
+                    status: s.status,
+                    image_path: s.image_path || null,
+                    image_base64: s.image_base64 || null,
+                  }));
+                return (
+                  <div key={cardId} style={{ border: '1px solid #e2e8f0', borderRadius: '12px', background: isExpanded ? '#f8fafc' : '#fff', overflow: 'hidden' }}>
+                    {/* Card header */}
+                    <div
+                      style={{ padding: '1rem 1.25rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
+                      onClick={() => setExpandedId(isExpanded ? null : cardId)}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem', flex: 1 }}>
+                        {r.passed
+                          ? <CheckCircle2 color="#10b981" size={22} />
+                          : <XCircle color="#ef4444" size={22} />}
+                        <div>
+                          <div style={{ fontWeight: 700, color: '#1e293b', fontSize: '1rem' }}>{r.title}</div>
+                          <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 500, display: 'flex', gap: '0.5rem', alignItems: 'center', marginTop: '2px' }}>
+                            <span>{r.step_results?.length || 0} Actions</span>
+                            <span>•</span>
+                            <span style={{ color: r.passed ? '#10b981' : '#ef4444', fontWeight: 700 }}>
+                              {r.passed ? '✓ Passed' : '✗ Failed'}
+                            </span>
+                            <span>•</span>
+                            <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
+                              {r.executed_at ? new Date(r.executed_at).toLocaleString() : ''}
+                            </span>
+                            {screenshots.length > 0 && (
+                              <>
+                                <span>•</span>
+                                <span style={{ display: 'flex', alignItems: 'center', gap: '3px', color: '#0891b2', fontSize: '0.72rem', fontWeight: 600 }}>
+                                  <ImageIcon size={11} /> {screenshots.length} screenshots
+                                </span>
+                              </>
+                            )}
+                            {r.video_path && (
+                              <>
+                                <span>•</span>
+                                <span style={{ color: '#7c3aed', fontSize: '0.72rem', fontWeight: 600 }}>▶ video</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      <span style={{ fontSize: '0.7rem', color: '#94a3b8', transition: 'transform 0.2s', display: 'inline-block', transform: isExpanded ? 'rotate(0deg)' : 'rotate(-90deg)' }}>▼</span>
+                    </div>
+
+                    {/* Expanded: step trace + slideshow + video */}
+                    {isExpanded && (
+                      <div style={{ padding: '1.25rem', borderTop: '1px solid #e2e8f0', background: '#ffffff' }}>
+                        {renderStepTrace(r.step_results || [])}
+                        <SlideshowPanel
+                          screenshots={screenshots}
+                          isHeadfulOnly={screenshots.length === 0}
+                          videoPath={r.video_path}
+                        />
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+        ) : (
+
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
 
           {/* ⚡ SWAPPED SWEEP: HISTORIC NATURAL LANGUAGE RUNS RENDERED AT THE TOP OF THE LIST STACK */}
@@ -941,6 +1076,7 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
           )}
 
         </div>
+        )} {/* end isReadOnly ternary — closes the else branch wrapping the staged queue */}
       </div>
 
       {lightboxImg && (
