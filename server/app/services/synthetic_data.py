@@ -54,9 +54,20 @@ class FieldExtractionSchema(BaseModel):
     fields: List[str] = Field(description="Subset of the known field taxonomy the request is asking for")
 
 
+class FieldValue(BaseModel):
+    key: str = Field(description="The field's key — must be exactly one of the template's field schema keys")
+    value: str = Field(description="The generated value for that field")
+
+
+class GeneratedRecord(BaseModel):
+    fields: List[FieldValue] = Field(
+        description="One entry per template field key. Must cover every key in the schema exactly once."
+    )
+
+
 class BulkRecordSchema(BaseModel):
-    records: List[Dict[str, str]] = Field(
-        description="List of generated records. Every record must have exactly the same keys as the template's field schema."
+    records: List[GeneratedRecord] = Field(
+        description="List of generated records. Every record's fields must have exactly the same keys as the template's field schema."
     )
 
 
@@ -141,13 +152,23 @@ Generate exactly {count} records. Each record must:
 - Be genuinely DISTINCT from every other record — different names/emails/usernames etc.,
   not the same value with a number appended (e.g. NOT "user1", "user2", "user3")
 
-Return ONLY JSON: {{"records": [{{...}}, ...]}} with exactly {count} records."""
+Return ONLY JSON in this exact shape: {{"records": [{{"fields": [{{"key": "...", "value": "..."}}, ...]}}, ...]}}
+— {count} records, each with one {{"key", "value"}} entry per field listed above, nothing more or less."""
 
     config = types.GenerateContentConfig(
         temperature=0.9,
         response_mime_type="application/json",
         response_schema=BulkRecordSchema,
-        max_output_tokens=min(8000, 200 + count * len(field_keys) * 20)
+        # This is pure structured data generation, not a reasoning task — turn
+        # thinking off so the whole token budget goes to the actual JSON output.
+        # Without this, gemini-3-flash-preview can spend part of max_output_tokens
+        # on internal thinking, leaving too little for the response and truncating
+        # it mid-string (surfaces as a JSON parse error like "Unterminated string").
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        # Generous floor + per-field allowance: the nested {"key":.., "value":..}
+        # shape costs more tokens per field than a flat dict would, so this is
+        # sized for that overhead rather than the old cramped formula.
+        max_output_tokens=min(32000, 1500 + count * len(field_keys) * 40)
     )
     try:
         response = await _asyncio.to_thread(
@@ -157,13 +178,16 @@ Return ONLY JSON: {{"records": [{{...}}, ...]}} with exactly {count} records."""
             config=config
         )
         parsed = json.loads(response.text)
-        records = parsed.get("records", [])
-        # Defensive: keep only records that carry exactly the requested keys,
-        # and never return more than what was asked for.
+        raw_records = parsed.get("records", [])
+        # Defensive: reassemble each record's {"fields":[{"key","value"},...]}
+        # back into a plain dict, keep only ones that carry exactly the
+        # requested keys, and never return more than what was asked for.
         clean = []
-        for r in records:
-            if isinstance(r, dict) and set(r.keys()) == set(field_keys):
-                clean.append(r)
+        for r in raw_records:
+            pairs = r.get("fields", []) if isinstance(r, dict) else []
+            record = {p.get("key"): p.get("value") for p in pairs if isinstance(p, dict) and p.get("key")}
+            if set(record.keys()) == set(field_keys):
+                clean.append(record)
         return clean[:count]
     except Exception as e:
         print(f"[Bulk record generation error] {e}")

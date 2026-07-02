@@ -1,15 +1,39 @@
 import json
 import os
+import threading
 from fastapi import APIRouter, HTTPException # type: ignore
 from pydantic import BaseModel, Field # type: ignore
-from typing import List, Set, Optional
+from typing import List, Set, Optional, Dict
 from app.database import db
 from app.executors.web import WebExecutor
 from app.executors.nl_executor import NLExecutor
+from app.services.media_storage import SCREENSHOTS_DIR, VIDEOS_DIR
+
+
+def _delete_media_file(web_path: str | None):
+    """Delete a screenshot or video from disk given its web-relative path. Best-effort."""
+    if not web_path:
+        return
+    try:
+        if web_path.startswith("/media/screenshots/"):
+            full = os.path.join(SCREENSHOTS_DIR, os.path.basename(web_path))
+        elif web_path.startswith("/media/videos/"):
+            full = os.path.join(VIDEOS_DIR, os.path.basename(web_path))
+        else:
+            return
+        if os.path.exists(full):
+            os.remove(full)
+    except OSError:
+        pass
 
 router = APIRouter(prefix="/execute", tags=["execute"])
 
+# Legacy set — kept for backward compat with playwright.py checks
 ACTIVE_CANCELLATIONS: Set[str] = set()
+
+# New: per-base_url threading Events so _run_playwright (in its own thread)
+# can be woken up mid-step without waiting for the current step to finish.
+_CANCEL_EVENTS: Dict[str, threading.Event] = {}
 
 class ExecuteRequest(BaseModel):
     run_id: int
@@ -27,9 +51,13 @@ class StopSuiteRequest(BaseModel):
 
 @router.post("/stop")
 async def abort_suite_execution(payload: StopSuiteRequest):
-    """Registers an asynchronous cancellation token to gracefully terminate active loops."""
+    """Registers cancellation — sets both the legacy set and the threading Event."""
     ACTIVE_CANCELLATIONS.add(payload.base_url)
-    return {"status": "success", "message": f"Cancellation sweeping registered for {payload.base_url}"}
+    # Signal the threading.Event so _run_playwright wakes up immediately
+    # even if it's blocked mid-step waiting on a Playwright await.
+    if payload.base_url in _CANCEL_EVENTS:
+        _CANCEL_EVENTS[payload.base_url].set()
+    return {"status": "success", "message": f"Cancellation registered for {payload.base_url}"}
 
 
 @router.post("/")
@@ -269,6 +297,10 @@ async def execute_suite_direct(payload: DirectSuiteRequest):
     if payload.base_url in ACTIVE_CANCELLATIONS:
         ACTIVE_CANCELLATIONS.remove(payload.base_url)
 
+    # Create a fresh cancel Event for this run — cleared so it starts unsignalled.
+    cancel_event = threading.Event()
+    _CANCEL_EVENTS[payload.base_url] = cancel_event
+
     batch_label = f"Execute: Suite ({len(payload.test_cases)} tests) · {_time.strftime('%H:%M:%S')}"
 
     # Persist so this suite's results survive a page reload, same as NL execution.
@@ -330,7 +362,8 @@ async def execute_suite_direct(payload: DirectSuiteRequest):
             capture_screenshots=True,
             record_video=True,
             app_id=payload.appId,
-            batch_label=batch_label
+            batch_label=batch_label,
+            cancel_event=cancel_event
         )
         
         execution_results.append(result)
@@ -376,19 +409,65 @@ async def execute_suite_direct(payload: DirectSuiteRequest):
 
     if payload.base_url in ACTIVE_CANCELLATIONS:
         ACTIVE_CANCELLATIONS.remove(payload.base_url)
+    _CANCEL_EVENTS.pop(payload.base_url, None)
 
     ran = total_passed + total_failed
 
-    # Finalize the run summary now that execution has finished.
+    if was_aborted:
+        # User stopped the run — purge all partial data: DB rows + disk files.
+        # Nothing from an aborted run should survive.
+        try:
+            exec_results_rows = await db.executionresult.find_many(
+                where={"executionRunId": created_run_log.id}
+            )
+            for result in exec_results_rows:
+                try:
+                    step_results = json.loads(result.stepResults) if result.stepResults else []
+                    for step in step_results:
+                        _delete_media_file(step.get("image_path"))
+                except Exception:
+                    pass
+                try:
+                    paths = json.loads(result.screenshotPaths) if result.screenshotPaths else []
+                    for p in paths:
+                        _delete_media_file(p)
+                except Exception:
+                    pass
+                _delete_media_file(result.videoPath)
+
+            await db.executionresult.delete_many(where={"executionRunId": created_run_log.id})
+            await db.executionrun.delete(where={"id": created_run_log.id})
+            await db.testresult.delete_many(where={"runId": saved_run.id})
+            await db.testrun.delete(where={"id": saved_run.id})
+        except Exception as _cleanup_err:
+            print(f"[Abort cleanup error] {_cleanup_err}")
+
+        return {
+            "mode": "headless_suite",
+            "run_id": None,
+            "base_url": payload.base_url,
+            "summary": {
+                "total": len(payload.test_cases),
+                "executed": ran,
+                "passed": total_passed,
+                "failed": total_failed,
+                "not_run": len(payload.test_cases) - ran
+            },
+            "stopped_early": True,
+            "aborted": True,
+            "results": []
+        }
+
+    # Normal finish — finalize the run summary.
     await db.executionrun.update(where={"id": created_run_log.id}, data={
         "executed": ran,
         "passed": total_passed,
         "failed": total_failed,
         "notRun": len(payload.test_cases) - ran,
-        "stoppedEarly": (total_failed > 0) or was_aborted
+        "stoppedEarly": total_failed > 0
     })
     await db.testrun.update(where={"id": saved_run.id}, data={
-        "status": "completed" if total_failed == 0 and not was_aborted else "failed"
+        "status": "completed" if total_failed == 0 else "failed"
     })
 
     return {
@@ -402,6 +481,6 @@ async def execute_suite_direct(payload: DirectSuiteRequest):
             "failed": total_failed,
             "not_run": len(payload.test_cases) - ran
         },
-        "stopped_early": (total_failed > 0) or was_aborted,
+        "stopped_early": total_failed > 0,
         "results": execution_results
     }

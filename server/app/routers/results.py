@@ -1,4 +1,5 @@
 import json
+import os
 # pyrefly: ignore [missing-import]
 from fastapi import APIRouter, HTTPException, Depends
 # pyrefly: ignore [missing-import]
@@ -8,8 +9,60 @@ from pydantic import BaseModel
 from typing import List, Optional
 from app.database import db
 from app.auth.middleware import get_current_user
+from app.services.media_storage import SCREENSHOTS_DIR, VIDEOS_DIR
 
 router = APIRouter(prefix="/results", tags=["results"])
+
+
+def _delete_media_file(web_path: str | None):
+    """Delete a screenshot or video file from disk given its web-relative path."""
+    if not web_path:
+        return
+    try:
+        if web_path.startswith("/media/screenshots/"):
+            filename = os.path.basename(web_path)
+            full = os.path.join(SCREENSHOTS_DIR, filename)
+        elif web_path.startswith("/media/videos/"):
+            filename = os.path.basename(web_path)
+            full = os.path.join(VIDEOS_DIR, filename)
+        else:
+            return
+        if os.path.exists(full):
+            os.remove(full)
+    except OSError:
+        pass  # best-effort — never block DB cleanup because of a missing file
+
+
+async def _delete_run_with_artifacts(run_id: int):
+    """
+    Full teardown for a TestRun: deletes all DB rows (ExecutionResult,
+    ExecutionRun, TestResult, TestRun) AND the screenshot/video files
+    from disk so no orphan media is left behind.
+    """
+    execution_runs = await db.executionrun.find_many(where={"runId": run_id})
+    for er in execution_runs:
+        exec_results = await db.executionresult.find_many(where={"executionRunId": er.id})
+        for result in exec_results:
+            # Delete screenshots embedded in step_results
+            try:
+                step_results = json.loads(result.stepResults) if result.stepResults else []
+                for step in step_results:
+                    _delete_media_file(step.get("image_path"))
+            except Exception:
+                pass
+            # Delete from screenshotPaths column (belt-and-suspenders)
+            try:
+                paths = json.loads(result.screenshotPaths) if result.screenshotPaths else []
+                for p in paths:
+                    _delete_media_file(p)
+            except Exception:
+                pass
+            # Delete video
+            _delete_media_file(result.videoPath)
+        await db.executionresult.delete_many(where={"executionRunId": er.id})
+    await db.executionrun.delete_many(where={"runId": run_id})
+    await db.testresult.delete_many(where={"runId": run_id})
+    await db.testrun.delete(where={"id": run_id})
 
 
 def _generate_html_report(run, er, exec_results) -> str:
@@ -454,23 +507,16 @@ async def get_latest_execution_report(run_id: int, current_user=Depends(get_curr
 
 @router.delete("/{run_id}")
 async def delete_run(run_id: int, current_user=Depends(get_current_user)):
-    """Delete a test run. Only the creator or admin can delete."""
+    """Delete a test run and all its artifacts (DB rows + disk files)."""
     run = await db.testrun.find_unique(where={"id": run_id})
     if not run:
         raise HTTPException(status_code=404, detail=f"No test run found with id {run_id}")
 
-    # Only the creator or an admin can delete
     if current_user.role != "admin" and run.createdByUserId != current_user.id:
         raise HTTPException(status_code=403, detail="You don't have permission to delete this run.")
 
-    execution_runs = await db.executionrun.find_many(where={"runId": run_id})
-    for er in execution_runs:
-        await db.executionresult.delete_many(where={"executionRunId": er.id})
-    await db.executionrun.delete_many(where={"runId": run_id})
-    await db.testresult.delete_many(where={"runId": run_id})
-    await db.testrun.delete(where={"id": run_id})
-
-    return {"message": f"Run {run_id} and all its data deleted successfully"}
+    await _delete_run_with_artifacts(run_id)
+    return {"message": f"Run {run_id} and all its artifacts deleted successfully"}
 
 
 class DeleteResultsByTitleRequest(BaseModel):
@@ -522,6 +568,122 @@ async def delete_execution_results_by_title(
                 await db.testrun.delete(where={"id": er.runId})
 
     return {"deleted_count": deleted_count, "message": f"Deleted {deleted_count} execution result(s)"}
+
+
+
+@router.get("/executions/completed")
+async def get_completed_executions(
+    app_id: Optional[str] = None,
+    current_user=Depends(get_current_user)
+):
+    """
+    Returns the most-recent ExecutionResult for each unique (title, appId) pair
+    that the current user is allowed to see.
+
+    Rules:
+    - qa_reviewer: only sees results for apps they have been assigned to,
+      and only from TestRuns with visibility "all" or "qa_and_reviewer".
+    - All other roles: same visibility rules as list_all_runs.
+    - Deduplication: if the same test title was executed multiple times,
+      only the newest ExecutionResult for that title is returned.
+    """
+    # ── 1. Determine which app_ids to scope to ─────────────────────────────
+    if current_user.role == "qa_reviewer":
+        access_records = await db.userappaccess.find_many(
+            where={"userId": current_user.id}
+        )
+        assigned_app_ids = [a.appId for a in access_records]
+
+        if app_id:
+            if app_id not in assigned_app_ids:
+                return {"total": 0, "results": []}
+            effective_app_ids = [app_id]
+        else:
+            effective_app_ids = assigned_app_ids
+
+        if not effective_app_ids:
+            return {"total": 0, "results": []}
+    else:
+        effective_app_ids = [app_id] if app_id else None
+
+    # ── 2. Fetch TestRuns scoped by app + visibility ────────────────────────
+    visibility_filter = _build_visibility_filter(current_user)
+
+    if effective_app_ids is not None:
+        where_runs = {"appId": {"in": effective_app_ids}, **visibility_filter}
+    else:
+        where_runs = visibility_filter if visibility_filter else {}
+
+    runs = await db.testrun.find_many(where=where_runs, order={"createdAt": "desc"})
+    if not runs:
+        return {"total": 0, "results": []}
+
+    run_ids = [r.id for r in runs]
+    run_app_map = {r.id: r.appId for r in runs}
+
+    # ── 3. Fetch all ExecutionRuns for those TestRuns ───────────────────────
+    execution_runs = await db.executionrun.find_many(
+        where={"runId": {"in": run_ids}},
+        order={"createdAt": "desc"}
+    )
+    if not execution_runs:
+        return {"total": 0, "results": []}
+
+    exec_run_ids = [er.id for er in execution_runs]
+    # Map executionRunId → appId (through runId → TestRun.appId)
+    exec_run_app_map = {er.id: run_app_map.get(er.runId) for er in execution_runs}
+
+    # ── 4. Fetch all ExecutionResults for those ExecutionRuns ───────────────
+    all_results = await db.executionresult.find_many(
+        where={"executionRunId": {"in": exec_run_ids}},
+        order={"createdAt": "desc"}  # newest first — dedup keeps first seen
+    )
+
+    # ── 5. Deduplicate: keep only the most-recent result per (title, appId) ─
+    seen: set = set()
+    deduped = []
+    for r in all_results:
+        app = exec_run_app_map.get(r.executionRunId)
+        key = (r.title.strip().lower(), app)
+        if key not in seen:
+            seen.add(key)
+            deduped.append((r, app))
+
+    # ── 6. Shape response ───────────────────────────────────────────────────
+    output = []
+    for r, r_app_id in deduped:
+        step_results = json.loads(r.stepResults) if r.stepResults else []
+        screenshot_paths = json.loads(r.screenshotPaths) if r.screenshotPaths else []
+
+        # Enrich steps with image_paths if not already embedded
+        has_embedded = any(s.get("image_path") for s in step_results)
+        if not has_embedded and screenshot_paths:
+            path_iter = iter(screenshot_paths)
+            enriched = []
+            for s in step_results:
+                entry = dict(s)
+                try:
+                    entry["image_path"] = next(path_iter)
+                except StopIteration:
+                    entry.setdefault("image_path", None)
+                enriched.append(entry)
+            step_results = enriched
+
+        output.append({
+            "execution_result_id": r.id,
+            "title": r.title,
+            "passed": r.passed,
+            "type": r.type,
+            "expected_result": r.expectedResult,
+            "agent_output": r.agentOutput,
+            "step_results": step_results,
+            "screenshot_paths": screenshot_paths,
+            "video_path": r.videoPath,
+            "executed_at": r.createdAt,
+            "app_id": r_app_id,
+        })
+
+    return {"total": len(output), "results": output}
 
 
 # ── Internal helper ────────────────────────────────────────────────────────
