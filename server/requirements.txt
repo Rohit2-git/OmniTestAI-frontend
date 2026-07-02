@@ -10,3 +10,7 @@ python-multipart
 playwright
 stagehand
 pillow
+python-docx
+bcrypt
+pyjwt
+pydantic[email]

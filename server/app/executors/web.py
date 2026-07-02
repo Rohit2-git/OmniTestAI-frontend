@@ -18,7 +18,9 @@ class WebExecutor(BaseExecutor):
         self,
         test_case: dict,
         base_url: str,
-        continue_on_fail: bool = False
+        continue_on_fail: bool = False,
+        app_id: str = None,
+        batch_label: str = None
     ) -> dict:
         """
         SINGLE TEST MODE — headful browser.
@@ -28,13 +30,17 @@ class WebExecutor(BaseExecutor):
             test_case=test_case,
             base_url=base_url,
             headful=True,
-            capture_screenshots=True
+            capture_screenshots=True,
+            app_id=app_id,
+            batch_label=batch_label
         )
 
     async def execute_test_case_headless(
         self,
         test_case: dict,
         base_url: str,
+        app_id: str = None,
+        batch_label: str = None
     ) -> dict:
         """
         SUITE MODE — headless browser.
@@ -44,5 +50,7 @@ class WebExecutor(BaseExecutor):
             test_case=test_case,
             base_url=base_url,
             headful=False,
-            capture_screenshots=True
+            capture_screenshots=True,
+            app_id=app_id,
+            batch_label=batch_label
         )

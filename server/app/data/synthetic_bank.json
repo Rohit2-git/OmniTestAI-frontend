@@ -1,0 +1,162 @@
+[
+  {
+    "name": "Sarah Connor", "first_name": "Sarah", "last_name": "Connor",
+    "email": "sarah.connor@example.com", "age": "34", "dob": "1990-05-12",
+    "phone": "+1-415-555-0148", "address": "1822 Maple Avenue", "city": "San Francisco",
+    "state": "CA", "zip_code": "94110", "country": "United States",
+    "username": "sconnor90", "password": "TestPass!2024", "company": "Cyberdyne Logistics",
+    "job_title": "Operations Lead", "credit_card": "4111111111111111"
+  },
+  {
+    "name": "Rahul Mehta", "first_name": "Rahul", "last_name": "Mehta",
+    "email": "rahul.mehta@example.com", "age": "29", "dob": "1995-11-03",
+    "phone": "+91-98200-12345", "address": "Flat 12B, Lotus Residency", "city": "Hyderabad",
+    "state": "Telangana", "zip_code": "500081", "country": "India",
+    "username": "rmehta29", "password": "Hyd@2025secure", "company": "Bluepeak Software",
+    "job_title": "QA Engineer", "credit_card": "5500000000000004"
+  },
+  {
+    "name": "Amelia Clarke", "first_name": "Amelia", "last_name": "Clarke",
+    "email": "amelia.clarke@example.com", "age": "41", "dob": "1983-02-22",
+    "phone": "+44-7700-900123", "address": "14 Baker Street", "city": "London",
+    "state": "Greater London", "zip_code": "NW1 6XE", "country": "United Kingdom",
+    "username": "aclarke83", "password": "LondonRain!41", "company": "Hartwell & Co",
+    "job_title": "Product Manager", "credit_card": "340000000000009"
+  },
+  {
+    "name": "Diego Fernandez", "first_name": "Diego", "last_name": "Fernandez",
+    "email": "diego.fernandez@example.com", "age": "25", "dob": "1999-08-09",
+    "phone": "+34-612-345-678", "address": "Calle Mayor 45", "city": "Madrid",
+    "state": "Madrid", "zip_code": "28013", "country": "Spain",
+    "username": "dfernandez99", "password": "MadridSol25!", "company": "Iberia Retail Group",
+    "job_title": "Frontend Developer", "credit_card": "6011000000000004"
+  },
+  {
+    "name": "Yuki Tanaka", "first_name": "Yuki", "last_name": "Tanaka",
+    "email": "yuki.tanaka@example.com", "age": "37", "dob": "1987-12-30",
+    "phone": "+81-90-1234-5678", "address": "3-15-2 Shibuya", "city": "Tokyo",
+    "state": "Tokyo", "zip_code": "150-0002", "country": "Japan",
+    "username": "ytanaka87", "password": "SakuraBloom37", "company": "Nakamura Systems",
+    "job_title": "Backend Engineer", "credit_card": "3530111333300000"
+  },
+  {
+    "name": "Olivia Brown", "first_name": "Olivia", "last_name": "Brown",
+    "email": "olivia.brown@example.com", "age": "52", "dob": "1972-06-18",
+    "phone": "+1-312-555-0199", "address": "780 Lakeshore Drive", "city": "Chicago",
+    "state": "IL", "zip_code": "60611", "country": "United States",
+    "username": "obrown72", "password": "ChicagoWind!52", "company": "Brightline Consulting",
+    "job_title": "Director of QA", "credit_card": "6011000000000004"
+  },
+  {
+    "name": "Kwame Asante", "first_name": "Kwame", "last_name": "Asante",
+    "email": "kwame.asante@example.com", "age": "31", "dob": "1993-03-27",
+    "phone": "+233-24-123-4567", "address": "22 Ring Road East", "city": "Accra",
+    "state": "Greater Accra", "zip_code": "GA-184-3021", "country": "Ghana",
+    "username": "kasante93", "password": "AccraSun!31", "company": "Sahel Digital",
+    "job_title": "Mobile Developer", "credit_card": "4012888888881881"
+  },
+  {
+    "name": "Mei Lin", "first_name": "Mei", "last_name": "Lin",
+    "email": "mei.lin@example.com", "age": "28", "dob": "1996-09-14",
+    "phone": "+65-8123-4567", "address": "Block 45, Tampines Street 11", "city": "Singapore",
+    "state": "Singapore", "zip_code": "529456", "country": "Singapore",
+    "username": "meilin96", "password": "SGarden28!", "company": "Marina Tech Pte Ltd",
+    "job_title": "UX Designer", "credit_card": "5500000000000004"
+  },
+  {
+    "name": "Liam O'Sullivan", "first_name": "Liam", "last_name": "O'Sullivan",
+    "email": "liam.osullivan@example.com", "age": "45", "dob": "1979-01-05",
+    "phone": "+353-87-123-4567", "address": "9 Grafton Street", "city": "Dublin",
+    "state": "Leinster", "zip_code": "D02 XY45", "country": "Ireland",
+    "username": "losullivan79", "password": "DublinRain45", "company": "Emerald Cloud Ltd",
+    "job_title": "DevOps Lead", "credit_card": "4222222222222"
+  },
+  {
+    "name": "Fatima Al-Sayed", "first_name": "Fatima", "last_name": "Al-Sayed",
+    "email": "fatima.alsayed@example.com", "age": "33", "dob": "1991-07-21",
+    "phone": "+971-50-123-4567", "address": "Marina Walk, Tower 4", "city": "Dubai",
+    "state": "Dubai", "zip_code": "00000", "country": "United Arab Emirates",
+    "username": "falsayed91", "password": "DesertStar!33", "company": "Falcon Apps FZ",
+    "job_title": "Business Analyst", "credit_card": "3566002020360505"
+  },
+  {
+    "name": "Noah Schmidt", "first_name": "Noah", "last_name": "Schmidt",
+    "email": "noah.schmidt@example.com", "age": "23", "dob": "2001-04-11",
+    "phone": "+49-151-12345678", "address": "Hauptstraße 22", "city": "Berlin",
+    "state": "Berlin", "zip_code": "10115", "country": "Germany",
+    "username": "nschmidt01", "password": "BerlinNacht23", "company": "Spree Softwarehaus",
+    "job_title": "Junior Developer", "credit_card": "6011000000000004"
+  },
+  {
+    "name": "Grace Mwangi", "first_name": "Grace", "last_name": "Mwangi",
+    "email": "grace.mwangi@example.com", "age": "39", "dob": "1985-10-02",
+    "phone": "+254-712-345678", "address": "Ngong Road 88", "city": "Nairobi",
+    "state": "Nairobi", "zip_code": "00100", "country": "Kenya",
+    "username": "gmwangi85", "password": "NairobiSky!39", "company": "Savannah Tech Hub",
+    "job_title": "QA Lead", "credit_card": "4111111111111111"
+  },
+  {
+    "name": "Lucas Silva", "first_name": "Lucas", "last_name": "Silva",
+    "email": "lucas.silva@example.com", "age": "27", "dob": "1997-12-19",
+    "phone": "+55-11-91234-5678", "address": "Avenida Paulista 1500", "city": "São Paulo",
+    "state": "SP", "zip_code": "01310-100", "country": "Brazil",
+    "username": "lsilva97", "password": "PauStreet27!", "company": "Cerrado Apps",
+    "job_title": "Full Stack Developer", "credit_card": "5066991111111118"
+  },
+  {
+    "name": "Anna Kowalski", "first_name": "Anna", "last_name": "Kowalski",
+    "email": "anna.kowalski@example.com", "age": "48", "dob": "1976-05-30",
+    "phone": "+48-601-234-567", "address": "Ulica Floriańska 10", "city": "Krakow",
+    "state": "Lesser Poland", "zip_code": "31-019", "country": "Poland",
+    "username": "akowalski76", "password": "KrakowZima48", "company": "Wisła Systems",
+    "job_title": "Test Architect", "credit_card": "4012888888881881"
+  },
+  {
+    "name": "Ethan Walker", "first_name": "Ethan", "last_name": "Walker",
+    "email": "ethan.walker@example.com", "age": "21", "dob": "2003-02-14",
+    "phone": "+1-512-555-0173", "address": "501 Congress Avenue", "city": "Austin",
+    "state": "TX", "zip_code": "78701", "country": "United States",
+    "username": "ewalker03", "password": "AustinHeat21!", "company": "Lonestar Cloudworks",
+    "job_title": "QA Intern", "credit_card": "3400000000000009"
+  },
+  {
+    "name": "Priya Nair", "first_name": "Priya", "last_name": "Nair",
+    "email": "priya.nair@example.com", "age": "30", "dob": "1994-06-08",
+    "phone": "+91-90000-11223", "address": "12, Marine Drive", "city": "Kochi",
+    "state": "Kerala", "zip_code": "682031", "country": "India",
+    "username": "pnair94", "password": "KochiMon30!", "company": "Backwater Cloud",
+    "job_title": "Automation Engineer", "credit_card": "6011000000000004"
+  },
+  {
+    "name": "Hugo Lefevre", "first_name": "Hugo", "last_name": "Lefevre",
+    "email": "hugo.lefevre@example.com", "age": "36", "dob": "1988-09-25",
+    "phone": "+33-6-12-34-56-78", "address": "12 Rue de Rivoli", "city": "Paris",
+    "state": "Île-de-France", "zip_code": "75001", "country": "France",
+    "username": "hlefevre88", "password": "ParisSoir!36", "company": "Lumière Digitale",
+    "job_title": "Engineering Manager", "credit_card": "4222222222222"
+  },
+  {
+    "name": "Chloe Anderson", "first_name": "Chloe", "last_name": "Anderson",
+    "email": "chloe.anderson@example.com", "age": "26", "dob": "1998-03-17",
+    "phone": "+61-4-1234-5678", "address": "200 George Street", "city": "Sydney",
+    "state": "NSW", "zip_code": "2000", "country": "Australia",
+    "username": "canderson98", "password": "SydneySun!26", "company": "Harbourline Tech",
+    "job_title": "Support Engineer", "credit_card": "5500000000000004"
+  },
+  {
+    "name": "Tomás Herrera", "first_name": "Tomás", "last_name": "Herrera",
+    "email": "tomas.herrera@example.com", "age": "44", "dob": "1980-11-11",
+    "phone": "+52-55-1234-5678", "address": "Avenida Reforma 222", "city": "Mexico City",
+    "state": "CDMX", "zip_code": "06600", "country": "Mexico",
+    "username": "therrera80", "password": "CDMXluz44", "company": "Volcán Software",
+    "job_title": "Solutions Architect", "credit_card": "4012888888881881"
+  },
+  {
+    "name": "Ingrid Larsen", "first_name": "Ingrid", "last_name": "Larsen",
+    "email": "ingrid.larsen@example.com", "age": "32", "dob": "1992-08-04",
+    "phone": "+47-412-34-567", "address": "Karl Johans gate 5", "city": "Oslo",
+    "state": "Oslo", "zip_code": "0154", "country": "Norway",
+    "username": "ilarsen92", "password": "OsloFjord32!", "company": "Nordlys Apps",
+    "job_title": "Data Engineer", "credit_card": "6011000000000004"
+  }
+]

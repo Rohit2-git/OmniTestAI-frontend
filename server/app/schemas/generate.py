@@ -11,7 +11,7 @@ class TestCase(BaseModel):
 
 
 class GenerateTestResponse(BaseModel):
-    run_id: int
+    run_id: Optional[int] = None
     filename: str
     total: int
     source: str           # "document", "wireframe", or "document + wireframe"
