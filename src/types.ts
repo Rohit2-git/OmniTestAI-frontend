@@ -1,3 +1,12 @@
+export type Role = 'admin' | 'qa_engineer' | 'qa_reviewer' | 'developer';
+
+export interface User {
+  id: number;
+  email: string;
+  name: string;
+  role: Role;
+}
+
 export interface Application {
   id: string;
   name: string;

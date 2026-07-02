@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
-import { saveScreenshots, loadAllScreenshotsForApp, clearScreenshotsForApp } from '../utils/screenshotStorage';
+import { useAuth } from '../context/AuthContext';
 import { 
   Play, Command, ListTodo, Trash2, CheckCircle2, 
-  XCircle, Image as ImageIcon, Terminal as TerminalIcon, Maximize2, Loader2, Layers
+  XCircle, Image as ImageIcon, Terminal as TerminalIcon, Maximize2, Loader2, Layers, Sparkles
 } from 'lucide-react';
 
 const API_BASE = 'http://localhost:8000';
@@ -14,11 +14,16 @@ interface ExecutorProps {
   addToQueue?: (ids: string[]) => void;
 }
 
-const SlideshowPanel: React.FC<{ screenshots: any[]; isHeadfulOnly?: boolean; videoBase64?: string }> = ({
-  screenshots, isHeadfulOnly = false, videoBase64
+const SlideshowPanel: React.FC<{ screenshots: any[]; isHeadfulOnly?: boolean; videoBase64?: string; videoPath?: string }> = ({
+  screenshots, isHeadfulOnly = false, videoBase64, videoPath
 }) => {
   const [slideIdx, setSlideIdx] = useState(0);
   const total = screenshots.length;
+
+  // Prefer the saved file URL (works after reload) over base64 (only present
+  // during a live, in-progress run before the result has been persisted).
+  const slideSrc = (s: any) => s?.image_path ? `${API_BASE}${s.image_path}` : `data:image/png;base64,${s?.image_base64}`;
+  const videoSrc = videoPath ? `${API_BASE}${videoPath}` : (videoBase64 ? `data:video/webm;base64,${videoBase64}` : null);
 
   return (
     <div>
@@ -32,7 +37,7 @@ const SlideshowPanel: React.FC<{ screenshots: any[]; isHeadfulOnly?: boolean; vi
         <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '1rem' }}>
           <div style={{ position: 'relative', borderRadius: '8px', overflow: 'hidden', background: '#000', aspectRatio: '16/9', marginBottom: '0.75rem' }}>
             <img
-              src={`data:image/png;base64,${screenshots[slideIdx]?.image_base64}`}
+              src={slideSrc(screenshots[slideIdx])}
               alt={`Step ${screenshots[slideIdx]?.step_number}`}
               style={{ width: '100%', height: '100%', objectFit: 'contain' }}
             />
@@ -70,20 +75,20 @@ const SlideshowPanel: React.FC<{ screenshots: any[]; isHeadfulOnly?: boolean; vi
             {screenshots.map((s: any, i: number) => (
               <div key={i} onClick={() => setSlideIdx(i)}
                 style={{ flexShrink: 0, width: '64px', height: '42px', borderRadius: '5px', overflow: 'hidden', cursor: 'pointer', border: i === slideIdx ? '2px solid #0891b2' : '2px solid transparent', opacity: i === slideIdx ? 1 : 0.6, transition: 'all 0.15s' }}>
-                <img src={`data:image/png;base64,${s.image_base64}`} alt={`Step ${s.step_number}`} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                <img src={slideSrc(s)} alt={`Step ${s.step_number}`} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               </div>
             ))}
           </div>
         </div>
       )}
 
-      {videoBase64 && (
+      {videoSrc && (
         <div style={{ marginTop: '1rem' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
             <span style={{ fontSize: '0.7rem', fontWeight: 800, color: '#7c3aed', textTransform: 'uppercase', letterSpacing: '0.08em' }}>▶ SESSION RECORDING</span>
           </div>
           <video controls style={{ width: '100%', borderRadius: '10px', border: '1px solid #e2e8f0', background: '#000', maxHeight: '400px' }}
-            src={`data:video/webm;base64,${videoBase64}`} />
+            src={videoSrc} />
         </div>
       )}
     </div>
@@ -106,7 +111,7 @@ const TestCard: React.FC<{
           <div>
             <div style={{ fontWeight: 700, color: '#1e293b', fontSize: '1rem' }}>{tc.title}</div>
             <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 500 }}>
-              {tc.steps.length} Actions •{' '}
+              {tc.steps ? `${tc.steps.length} Actions` : 'Autonomous Actions'} •{' '}
               {result ? (result.passed ? '✓ Passed' : '✗ Failed') : 'Pending'} •{' '}
               <span style={{
                 background: tc.priority === 'high' ? '#fee2e2' : tc.priority === 'medium' ? '#fef3c7' : '#dcfce7',
@@ -117,20 +122,24 @@ const TestCard: React.FC<{
           </div>
         </div>
         <div style={{ display: 'flex', gap: '0.75rem' }}>
-          <button onClick={(e) => { e.stopPropagation(); onRun(tc); }} disabled={isProcessing}
-            style={{ padding: '8px', borderRadius: '8px', border: '1px solid #e2e8f0', background: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
-            <Play size={16} style={{ color: '#0f172a' }} />
-          </button>
-          <button onClick={(e) => onRemove(e, tc.id)}
-            style={{ padding: '8px', borderRadius: '8px', border: '1px solid #fee2e2', background: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
-            <Trash2 size={16} style={{ color: '#ef4444' }} />
-          </button>
+          {onRun && (
+            <button onClick={(e) => { e.stopPropagation(); onRun(tc); }} disabled={isProcessing}
+              style={{ padding: '8px', borderRadius: '8px', border: '1px solid #e2e8f0', background: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+              <Play size={16} style={{ color: '#0f172a' }} />
+            </button>
+          )}
+          {onRemove && (
+            <button onClick={(e) => onRemove(e, tc.id)}
+              style={{ padding: '8px', borderRadius: '8px', border: '1px solid #fee2e2', background: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+              <Trash2 size={16} style={{ color: '#ef4444' }} />
+            </button>
+          )}
         </div>
       </div>
       {isExpanded && result && (
         <div style={{ padding: '1.25rem', borderTop: '1px solid #e2e8f0', background: '#ffffff' }}>
           {renderStepTrace(result.step_results || [])}
-          <SlideshowPanel screenshots={result.screenshots || []} isHeadfulOnly={isHeadfulOnly} videoBase64={result.video_base64} />
+          <SlideshowPanel screenshots={result.screenshots || []} isHeadfulOnly={isHeadfulOnly} videoBase64={result.video_base64} videoPath={result.video_path} />
         </div>
       )}
     </div>
@@ -145,23 +154,113 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
     isSuiteRunning, setIsSuiteRunning,
     isNLRunning, setIsNLRunning
   } = useApp();
+  const { user } = useAuth();
+  const isReadOnly = user?.role === 'qa_reviewer';
+
   const [nlCommand, setNlCommand] = useState('');
+  
+  const [nlHistoricalRuns, setNlHistoricalRuns] = useState<any[]>([]);
+
   const processingId = activeExecutionId;
   const setProcessingId = setActiveExecutionId;
   const isProcessing = isSuiteRunning || isNLRunning || activeExecutionId !== null;
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
-  const toggleSection = (section: string) => setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
+  const sectionsKey = `omnitest_expanded_sections_${activeAppId || 'default'}`;
+  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>(() => {
+    try {
+      const saved = localStorage.getItem(`omnitest_expanded_sections_${activeAppId || 'default'}`);
+      return saved ? JSON.parse(saved) : {};
+    } catch { return {}; }
+  });
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(`omnitest_expanded_sections_${activeAppId || 'default'}`);
+      setExpandedSections(saved ? JSON.parse(saved) : {});
+    } catch { setExpandedSections({}); }
+  }, [activeAppId]);
+
+  const toggleSection = (section: string) => {
+    setExpandedSections(prev => {
+      const next = { ...prev, [section]: prev[section] === false ? true : false };
+      try { localStorage.setItem(`omnitest_expanded_sections_${activeAppId || 'default'}`, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
   const [lightboxImg, setLightboxImg] = useState<string | null>(null);
+  const [showRunDropdown, setShowRunDropdown] = useState(false);
+  const [showClearDropdown, setShowClearDropdown] = useState(false);
 
   const stagedKey = `omnitest_staged_ids_${activeAppId || 'default'}`;
-  const [idbScreenshots, setIdbScreenshots] = useState<Record<string, { screenshots: any[]; videoBase64?: string }>>({});
+  // Renamed from idbScreenshots: this now comes from the real database via
+  // /results/, not browser-local IndexedDB, so results survive reload
+  // across any browser/device, not just the one that ran the test.
+  const [dbExecutionResults, setDbExecutionResults] = useState<Record<string, { screenshots: any[]; videoBase64?: string; videoPath?: string }>>({});
 
   useEffect(() => {
     if (!activeAppId) return;
-    loadAllScreenshotsForApp(activeAppId).then(data => {
-      setIdbScreenshots(data);
-    });
+
+    const loadFromDb = async () => {
+      try {
+        const runsRes = await fetch(`${API_BASE}/results/?app_id=${activeAppId}`, { credentials: 'include' });
+        if (!runsRes.ok) return;
+        const runsData = await runsRes.json();
+        const runs: any[] = runsData.runs || [];
+
+        const merged: Record<string, { screenshots: any[]; videoBase64?: string; videoPath?: string; passed?: boolean; step_results?: any[] }> = {};
+
+        await Promise.all(runs.map(async (run: any) => {
+          try {
+            const execRes = await fetch(`${API_BASE}/results/${run.run_id}/execution/latest`, { credentials: 'include' });
+            if (!execRes.ok) return;
+            const execData = await execRes.json();
+            for (const tcResult of execData.test_case_results || []) {
+              const stepResults: any[] = tcResult.step_results || [];
+
+              // Screenshots come from step_results directly — each step has
+              // image_path and image_base64 embedded, so there's no parallel
+              // array alignment assumption. Only steps that actually have a
+              // screenshot appear in the slideshow.
+              const screenshots = stepResults
+                .filter((s: any) => s.image_path || s.image_base64)
+                .map((s: any) => ({
+                  step_number: s.step_number,
+                  step: s.step || s.detail || '',
+                  status: s.status,
+                  image_path: s.image_path || null,
+                  image_base64: s.image_base64 || null,
+                }));
+
+              merged[tcResult.title] = {
+                passed: tcResult.passed,
+                step_results: stepResults,
+                screenshots,
+                videoPath: tcResult.video_path || undefined,
+              };
+            }
+          } catch { /* skip this run, keep going */ }
+        }));
+
+        setDbExecutionResults(merged);
+
+        // Load NL runs from DB — NL executions are saved as TestRuns with
+        // filename starting "NL:", so we filter them here for the sidebar.
+        const nlRuns = runs
+          .filter((r: any) => r.filename?.startsWith('NL:'))
+          .map((r: any) => ({
+            id: `nl-run-${r.run_id}`,
+            title: `NL Action Run — "${r.filename.replace(/^NL:\s*/, '').substring(0, 35)}${r.filename.replace(/^NL:\s*/, '').length > 35 ? '...' : ''}"`,
+            priority: 'high',
+            steps: [],
+            runId: r.run_id,
+          }));
+        setNlHistoricalRuns(nlRuns);
+      } catch (e) {
+        console.error('Failed to load execution history from DB:', e);
+      }
+    };
+
+    loadFromDb();
   }, [activeAppId]);
 
   const [stagedIds, setStagedIds] = useState<string[]>(() => {
@@ -178,12 +277,28 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
 
   const baseResults: Record<string, any> = executionResults[activeAppId || ''] || {};
   const testResults: Record<string, any> = Object.fromEntries(
-    Object.entries(baseResults).map(([title, result]) => {
-      const stored = idbScreenshots[title];
-      if (stored && (!result.screenshots || result.screenshots.length === 0)) {
-        return [title, { ...result, screenshots: stored.screenshots, video_base_64: stored.videoBase64 }];
+    Array.from(new Set([...Object.keys(baseResults), ...Object.keys(dbExecutionResults)])).map(title => {
+      const liveResult = baseResults[title];
+      const stored = dbExecutionResults[title];
+
+      if (liveResult && stored) {
+        return [title, {
+          ...liveResult,
+          screenshots: (liveResult.screenshots && liveResult.screenshots.length > 0) ? liveResult.screenshots : (stored.screenshots || []),
+          video_base64: liveResult.video_base64 || stored.videoBase64 || null,
+          video_path: liveResult.video_path || stored.videoPath || null,
+        }];
       }
-      return [title, result];
+      if (liveResult) return [title, liveResult];
+      // DB-only: reconstruct from what the database has — passed comes
+      // directly from the stored ExecutionResult.passed boolean, not inferred.
+      return [title, {
+        passed: stored!.passed ?? false,
+        step_results: stored!.step_results || [],
+        screenshots: stored!.screenshots || [],
+        video_base64: stored!.videoBase64 || null,
+        video_path: stored!.videoPath || null,
+      }];
     })
   );
   
@@ -211,6 +326,18 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
   }, [selectedTestIdsForRun]);
 
   useEffect(() => { localStorage.setItem(stagedKey, JSON.stringify(stagedIds)); }, [stagedIds, stagedKey]);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('[data-dropdown]')) {
+        setShowRunDropdown(false);
+        setShowClearDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
 
   const stagedTests = stagedIds
     .map(id => testCases.find(tc => tc.id === id))
@@ -252,13 +379,31 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
     } as any);
   };
 
-  const handleClearAll = () => {
+  const handleClearAll = async () => {
     setTestResults({});
     setExpandedId(null);
     setStagedIds([]);
-    setIdbScreenshots({});
+    setNlHistoricalRuns([]);
+    setDbExecutionResults({});
     localStorage.removeItem(stagedKey);
-    if (activeAppId) clearScreenshotsForApp(activeAppId);
+    if (activeAppId) {
+      // Delete the underlying DB rows — clearing should remove
+      // the data, not just hide it locally until the next reload brings it back.
+      try {
+        const runsRes = await fetch(`${API_BASE}/results/?app_id=${activeAppId}`, { credentials: 'include' });
+        if (runsRes.ok) {
+          const runsData = await runsRes.json();
+          const runs: any[] = runsData.runs || [];
+          await Promise.all(
+            runs.map((run: any) =>
+              fetch(`${API_BASE}/results/${run.run_id}`, { method: 'DELETE', credentials: 'include' }).catch(() => {})
+            )
+          );
+        }
+      } catch (e) {
+        console.error('Failed to delete execution history from DB:', e);
+      }
+    }
     setExecutionResults(prev => {
       const next = { ...prev };
       delete next[activeAppId || ''];
@@ -272,6 +417,31 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
     setStagedIds(prev => prev.filter(id => id !== tcId));
   };
 
+  const handleRemoveNL = (e: React.MouseEvent, localRunId: string) => {
+    e.stopPropagation();
+    setNlHistoricalRuns(prev => {
+      const target = prev.find(r => r.id === localRunId);
+      const updated = prev.filter(r => r.id !== localRunId);
+      // Delete the DB row — that's the source of truth now.
+      if (target?.runId != null) {
+        fetch(`${API_BASE}/results/${target.runId}`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
+      }
+      return updated;
+    });
+  };
+
+  const handleClearAllNL = async () => {
+    setShowClearDropdown(false);
+    const runsToDelete = nlHistoricalRuns.filter(r => r.runId != null).map(r => r.runId);
+    setNlHistoricalRuns([]);
+    // Delete all NL run DB rows — source of truth.
+    await Promise.all(
+      runsToDelete.map((runId: number) =>
+        fetch(`${API_BASE}/results/${runId}`, { method: 'DELETE', credentials: 'include' }).catch(() => {})
+      )
+    );
+  };
+
   const handleSingleExecution = async (tc: any) => {
     if (!activeApp?.url) return;
     setIsSuiteRunning(true);
@@ -283,13 +453,14 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
       const res = await fetch(`${API_BASE}/execute/single`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: activeApp.url, steps, title: tc.title, expected_result: tc.steps[tc.steps.length - 1]?.expected || '' })
+        body: JSON.stringify({ url: activeApp.url, steps, title: tc.title, expected_result: tc.steps[tc.steps.length - 1]?.expected || '', appId: activeAppId })
       });
       const data = await res.json();
       setTestResults(prev => ({ ...prev, [tc.title]: data }));
       if (activeAppId) {
-        await saveScreenshots(activeAppId, tc.title, data.screenshots || [], data.video_base64);
-        setIdbScreenshots(prev => ({ ...prev, [tc.title]: { screenshots: data.screenshots || [], videoBase64: data.video_base64 } }));
+        // Backend already persisted this to the DB (results.py) — just mirror
+        // it into local state so it shows immediately without a refetch.
+        setDbExecutionResults(prev => ({ ...prev, [tc.title]: { screenshots: data.screenshots || [], videoBase64: data.video_base64, videoPath: data.video_path } }));
       }
       saveToHistory(data, 'headful_single', [tc.id], tc.title, startTime);
     } catch (err) {
@@ -314,7 +485,7 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
       const res = await fetch(`${API_BASE}/execute/suite`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ base_url: activeApp.url, test_cases: testCasesPayload })
+        body: JSON.stringify({ base_url: activeApp.url, test_cases: testCasesPayload, appId: activeAppId })
       });
       const data = await res.json();
       const resultMap: Record<string, any> = {};
@@ -323,12 +494,13 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
       }
       setTestResults(prev => ({ ...prev, ...resultMap }));
       if (activeAppId && data?.results) {
-        const idbUpdates: Record<string, any> = {};
+        // Backend already persisted each result to the DB — mirror into
+        // local state so it shows immediately without a refetch.
+        const dbUpdates: Record<string, any> = {};
         for (const r of data.results) {
-          await saveScreenshots(activeAppId, r.title, r.screenshots || [], r.video_base64);
-          idbUpdates[r.title] = { screenshots: r.screenshots || [], videoBase64: r.video_base64 };
+          dbUpdates[r.title] = { screenshots: r.screenshots || [], videoBase64: r.video_base64, videoPath: r.video_path };
         }
-        setIdbScreenshots(prev => ({ ...prev, ...idbUpdates }));
+        setDbExecutionResults(prev => ({ ...prev, ...dbUpdates }));
       }
       saveToHistory(data, 'headless_suite', stagedTests.map(tc => tc.id), undefined, startTime);
     } catch (err) {
@@ -338,7 +510,76 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
     }
   };
 
-  // INTERRUPT EXECUTION HOOK: Immediately notifies backend loop worker to abort
+  const handleRunSection = async (section: string) => {
+    setShowRunDropdown(false);
+    if (!activeApp?.url) return;
+    const sectionTests = groupedTests[section] || [];
+    if (sectionTests.length === 0) return;
+    setIsSuiteRunning(true);
+    const startTime = Date.now();
+    try {
+      const testCasesPayload = sectionTests.map((tc: any) => ({
+        title: tc.title,
+        steps: tc.steps.map((s: any) => s.instruction || s),
+        expected_result: tc.steps[tc.steps.length - 1]?.expected || '',
+        type: tc.source || 'functional'
+      }));
+      const res = await fetch(`${API_BASE}/execute/suite`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ base_url: activeApp.url, test_cases: testCasesPayload, appId: activeAppId })
+      });
+      const data = await res.json();
+      const resultMap: Record<string, any> = {};
+      if (data?.results) {
+        data.results.forEach((r: any) => { resultMap[r.title] = r; });
+      }
+      setTestResults((prev: any) => ({ ...prev, ...resultMap }));
+      if (activeAppId && data?.results) {
+        const dbUpdates: Record<string, any> = {};
+        for (const r of data.results) {
+          dbUpdates[r.title] = { screenshots: r.screenshots || [], videoBase64: r.video_base64, videoPath: r.video_path };
+        }
+        setDbExecutionResults(prev => ({ ...prev, ...dbUpdates }));
+      }
+      saveToHistory(data, 'headless_suite', sectionTests.map((tc: any) => tc.id), undefined, startTime);
+    } catch (err) {
+      console.error('Section execution error:', err);
+    } finally {
+      setIsSuiteRunning(false);
+    }
+  };
+
+  const handleClearSection = (section: string) => {
+    setShowClearDropdown(false);
+    const sectionTests = groupedTests[section] || [];
+    const sectionIds = sectionTests.map((tc: any) => tc.id);
+    const sectionTitles = sectionTests.map((tc: any) => tc.title);
+    setStagedIds(prev => prev.filter(id => !sectionIds.includes(id)));
+    setTestResults((prev: any) => {
+      const next = { ...prev };
+      sectionTitles.forEach(title => delete next[title]);
+      return next;
+    });
+    if (activeAppId) {
+      setDbExecutionResults(prev => {
+        const next = { ...prev };
+        sectionTitles.forEach(title => delete next[title]);
+        return next;
+      });
+      // Surgically delete only these titles' DB rows — never the whole
+      // batch/run, which could otherwise remove unrelated tests' results.
+      if (sectionTitles.length > 0) {
+        fetch(`${API_BASE}/results/execution/delete-by-title`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ app_id: activeAppId, titles: sectionTitles })
+        }).catch(e => console.error('Failed to delete section results from DB:', e));
+      }
+    }
+  };
+
   const handleStopSuiteExecution = async () => {
     if (!activeApp?.url) return;
     try {
@@ -356,27 +597,42 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
 
   const handleNLExecution = async () => {
     if (!nlCommand.trim() || !activeApp?.url) return;
-    setIsSuiteRunning(true);
+    setIsNLRunning(true);
     const startTime = Date.now();
+    const currentCommand = nlCommand;
     try {
-      const steps = nlCommand.split(/[\n;]+/).map(s => s.trim()).filter(Boolean);
+      const steps = currentCommand.split(/[\n;]+/).map(s => s.trim()).filter(Boolean);
       const res = await fetch(`${API_BASE}/execute/nl`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: activeApp.url, steps })
+        body: JSON.stringify({ url: activeApp.url, steps, appId: String(activeAppId) })
       });
       const data = await res.json();
-      setTestResults(prev => ({ ...prev, ['NL Ad-hoc Script Engine Trace']: data }));
-      setExpandedId('nl-adhoc-card');
+      
+      const uniqueId = `nl-run-${Date.now()}`;
+      const virtualTestCase = {
+        id: uniqueId,
+        title: `NL Action Run — "${currentCommand.length > 35 ? currentCommand.substring(0, 35) + '...' : currentCommand}"`,
+        priority: 'high',
+        steps: steps,
+        runId: data.run_id
+      };
+
+      setTestResults(prev => ({ ...prev, [virtualTestCase.title]: data }));
+      
+      setNlHistoricalRuns(prev => [virtualTestCase, ...prev]);
+
+      setExpandedId(uniqueId);
+      
       if (activeAppId) {
-        await saveScreenshots(activeAppId, 'NL Ad-hoc Script Engine Trace', data.screenshots || [], data.video_base64);
-        setIdbScreenshots(prev => ({ ...prev, ['NL Ad-hoc Script Engine Trace']: { screenshots: data.screenshots || [], videoBase64: data.video_base64 } }));
+        setDbExecutionResults(prev => ({ ...prev, [virtualTestCase.title]: { screenshots: data.screenshots || [], videoBase64: data.video_base64, videoPath: data.video_path } }));
       }
-      saveToHistory(data, 'headful_nl', [], nlCommand, startTime);
+      saveToHistory(data, 'natural_language', [], currentCommand, startTime);
+      setNlCommand('');
     } catch (err) {
       console.error('NL execution error:', err);
     } finally {
-      setIsSuiteRunning(false);
+      setIsNLRunning(false);
     }
   };
 
@@ -386,14 +642,57 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
         <TerminalIcon size={14} /> ORCHESTRATION_TRACE_STREAM
       </div>
       <div style={{ maxHeight: '180px', overflowY: 'auto' }}>
-        {stepResults?.map((st: any, i: number) => (
-          <div key={i} style={{ color: '#cbd5e1', fontSize: '0.8rem', fontFamily: 'monospace', marginBottom: '6px', lineHeight: '1.4' }}>
-            <span style={{ color: st.status === 'passed' ? '#10b981' : '#ef4444', marginRight: '8px' }}>●</span>
-            <span style={{ color: '#475569', marginRight: '8px' }}>[{st.step_number ?? i + 1}]</span>
-            {st.step}
-            {st.status === 'failed' && <span style={{ color: '#fca5a5', fontStyle: 'italic' }}> ({st.detail})</span>}
-          </div>
-        ))}
+        {stepResults?.map((st: any, i: number) => {
+          const detail: string = st.detail || '';
+          const isSelfHealed = detail.startsWith('[SELF-HEALED]');
+          const healExplanation = isSelfHealed ? detail.replace('[SELF-HEALED]', '').trim() : null;
+
+          return (
+            <div key={i} style={{ color: '#cbd5e1', fontSize: '0.8rem', fontFamily: 'monospace', marginBottom: '6px', lineHeight: '1.4' }}>
+              {/* Step status dot — amber for self-healed (recovered), green for clean pass, red for fail */}
+              <span style={{
+                color: isSelfHealed ? '#f59e0b' : st.status === 'passed' ? '#10b981' : '#ef4444',
+                marginRight: '8px'
+              }}>●</span>
+              <span style={{ color: '#475569', marginRight: '8px' }}>[{st.step_number ?? i + 1}]</span>
+              {st.step}
+
+              {/* Self-healing indicator — shown whenever Gemini had to intervene to recover this step */}
+              {isSelfHealed && (
+                <span style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  marginLeft: '8px',
+                  padding: '1px 7px',
+                  borderRadius: '5px',
+                  background: 'rgba(245,158,11,0.15)',
+                  border: '1px solid rgba(245,158,11,0.35)',
+                  color: '#f59e0b',
+                  fontSize: '0.68rem',
+                  fontWeight: 700,
+                  letterSpacing: '0.04em',
+                  fontFamily: 'Inter, system-ui, sans-serif',
+                  verticalAlign: 'middle',
+                }}>
+                  ⚡ SELF-HEALED
+                </span>
+              )}
+
+              {/* Healer explanation — shown as italic amber text below the step */}
+              {isSelfHealed && healExplanation && (
+                <div style={{ color: '#fbbf24', fontStyle: 'italic', fontSize: '0.72rem', marginTop: '2px', marginLeft: '24px', opacity: 0.85 }}>
+                  ↳ {healExplanation}
+                </div>
+              )}
+
+              {/* Normal failure detail — only shown for real failures, not healed ones */}
+              {st.status === 'failed' && !isSelfHealed && (
+                <span style={{ color: '#fca5a5', fontStyle: 'italic' }}> ({detail})</span>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -412,16 +711,22 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
           <span style={{ fontSize: '0.8rem', fontWeight: 800, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.05em' }}>NL Execution Controller</span>
         </div>
         <p style={{ fontSize: '0.78rem', color: '#94a3b8', marginBottom: '1rem' }}>Enter plain-English test instructions, one per line or separated by semicolons. Executes in an interactive browser session with screenshot capture.</p>
-        <div style={{ display: 'flex', gap: '1rem' }}>
-          <textarea className="input-field" value={nlCommand} onChange={(e) => setNlCommand(e.target.value)}
-            placeholder={"Navigate to the login page\nEnter valid email and password\nClick the login button"}
-            rows={3} style={{ flex: 1, padding: '0.75rem 1.25rem', borderRadius: '12px', border: '1px solid #cbd5e1', outline: 'none', fontSize: '0.9rem', resize: 'vertical', fontFamily: 'Inter, system-ui, sans-serif', color: '#1e293b', background: '#f8fafc', fontWeight: 400 }} />
-          <button onClick={handleNLExecution} disabled={isProcessing || !nlCommand.trim()}
-            style={{ borderRadius: '8px', padding: '8px 20px', background: '#06b6d4', color: '#fff', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.6rem', border: 'none', cursor: 'pointer', alignSelf: 'center', fontSize: '0.85rem' }}>
-            {isProcessing && !processingId ? <Loader2 className="animate-spin" size={18} /> : <Play size={18} />}
-            <span>Run</span>
-          </button>
-        </div>
+        {isReadOnly ? (
+          <div style={{ padding: '0.75rem 1rem', background: 'rgba(148,163,184,0.08)', border: '1px solid var(--border-light)', borderRadius: '10px', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+            View-only access — NL execution is restricted to QA Engineers and above.
+          </div>
+        ) : (
+          <div style={{ display: 'flex', gap: '1rem' }}>
+            <textarea className="input-field" value={nlCommand} onChange={(e) => setNlCommand(e.target.value)}
+              placeholder={"Navigate to the login page\nEnter valid email and password\nClick the login button"}
+              rows={3} style={{ flex: 1, padding: '0.75rem 1.25rem', borderRadius: '12px', border: '1px solid #cbd5e1', outline: 'none', fontSize: '0.9rem', resize: 'vertical', fontFamily: 'Inter, system-ui, sans-serif', color: '#1e293b', background: '#f8fafc', fontWeight: 400 }} />
+            <button onClick={handleNLExecution} disabled={isProcessing || !nlCommand.trim()}
+              style={{ borderRadius: '8px', padding: '8px 20px', background: '#06b6d4', color: '#fff', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.6rem', border: 'none', cursor: 'pointer', alignSelf: 'center', fontSize: '0.85rem' }}>
+              {isNLRunning ? <Loader2 className="animate-spin" size={18} /> : <Play size={18} />}
+              <span>Run</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* QUEUE */}
@@ -434,72 +739,174 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
             </span>
           </div>
           
-          {/* ACTION TOOLBAR BOX - Outlined cancel button placed precisely right beside Run Suite button */}
           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
-            <button onClick={handleClearAll} style={{ background: '#f1f5f9', color: '#475569', border: 'none', padding: '8px 16px', borderRadius: '8px', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer' }}>Clear All</button>
-            
+
+            {/* CLEAR ALL — split button */}
+            <div data-dropdown style={{ position: 'relative' }}>
+              <div style={{ display: 'flex', borderRadius: '8px', overflow: 'visible', border: '1px solid #e2e8f0' }}>
+                <button
+                  onClick={handleClearAll}
+                  style={{ background: '#f1f5f9', color: '#475569', border: 'none', padding: '8px 14px', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer', borderRight: '1px solid #e2e8f0' }}
+                >
+                  Clear All
+                </button>
+                <button
+                  onClick={() => { setShowClearDropdown(p => !p); setShowRunDropdown(false); }}
+                  disabled={Object.keys(groupedTests).length === 0 && nlHistoricalRuns.length === 0}
+                  style={{ background: '#f1f5f9', color: '#475569', border: 'none', padding: '8px 10px', fontWeight: 700, fontSize: '0.75rem', cursor: 'pointer' }}
+                >
+                  ▾
+                </button>
+              </div>
+              {showClearDropdown && (Object.keys(groupedTests).length > 0 || nlHistoricalRuns.length > 0) && (
+                <div style={{ position: 'absolute', top: 'calc(100% + 4px)', right: 0, background: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', boxShadow: '0 8px 24px rgba(0,0,0,0.12)', zIndex: 100, minWidth: '200px', overflow: 'hidden' }}>
+                  <div style={{ padding: '6px 12px', fontSize: '0.7rem', fontWeight: 800, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid #f1f5f9' }}>Clear by batch</div>
+                  {Object.entries(groupedTests).map(([section, tests]) => (
+                    <button
+                      key={section}
+                      onClick={() => handleClearSection(section)}
+                      style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', padding: '8px 14px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.82rem', color: '#374151', fontWeight: 600, textAlign: 'left' }}
+                      onMouseEnter={e => e.currentTarget.style.background = '#fef2f2'}
+                      onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                    >
+                      <span>{section}</span>
+                      <span style={{ fontSize: '0.7rem', color: '#94a3b8', fontWeight: 600 }}>({(tests as any[]).length})</span>
+                    </button>
+                  ))}
+                  {nlHistoricalRuns.length > 0 && (
+                    <>
+                      {Object.keys(groupedTests).length > 0 && <div style={{ borderTop: '1px solid #f1f5f9' }} />}
+                      <button
+                        onClick={handleClearAllNL}
+                        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', padding: '8px 14px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.82rem', color: '#7c3aed', fontWeight: 600, textAlign: 'left' }}
+                        onMouseEnter={e => e.currentTarget.style.background = '#f5f3ff'}
+                        onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                      >
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                          <Sparkles size={12} /> NL Executions
+                        </span>
+                        <span style={{ fontSize: '0.7rem', color: '#a78bfa', fontWeight: 600 }}>({nlHistoricalRuns.length})</span>
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* STOP EXECUTION */}
             {isSuiteRunning && (
-              <button 
+              <button
                 type="button"
                 onClick={handleStopSuiteExecution}
-                style={{ 
-                  background: '#fff1f2', 
-                  border: '1px solid #fecdd3', 
-                  color: '#e11d48', 
-                  padding: '8px 16px', 
-                  borderRadius: '8px', 
-                  fontWeight: 700, 
-                  fontSize: '0.85rem', 
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.4rem',
-                  transition: 'background 0.2s'
-                }}
-                onMouseEnter={(e) => e.currentTarget.style.background = '#ffe4e6'}
-                onMouseLeave={(e) => e.currentTarget.style.background = '#fff1f2'}
+                style={{ background: '#fff1f2', border: '1px solid #fecdd3', color: '#e11d48', padding: '8px 16px', borderRadius: '8px', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+                onMouseEnter={e => e.currentTarget.style.background = '#ffe4e6'}
+                onMouseLeave={e => e.currentTarget.style.background = '#fff1f2'}
               >
                 <XCircle size={15} />
                 <span>Stop Execution</span>
               </button>
             )}
 
-            <button onClick={handleBulkExecution} disabled={isProcessing || stagedTests.length === 0}
-              style={{ background: '#0f172a', color: '#fff', display: 'flex', alignItems: 'center', gap: '0.6rem', padding: '8px 20px', borderRadius: '8px', fontWeight: 700, border: 'none', cursor: 'pointer' }}>
-              {isProcessing && !processingId ? <Loader2 className="animate-spin" size={16} /> : null}
-              Run Suite
-            </button>
+            {/* RUN SUITE — split button */}
+            {!isReadOnly && <div data-dropdown style={{ position: 'relative' }}>
+              <div style={{ display: 'flex', borderRadius: '8px', overflow: 'visible' }}>
+                <button
+                  onClick={handleBulkExecution}
+                  disabled={isProcessing || stagedTests.length === 0}
+                  style={{ background: '#0f172a', color: '#fff', display: 'flex', alignItems: 'center', gap: '0.6rem', padding: '8px 18px', fontWeight: 700, border: 'none', cursor: 'pointer', borderRight: '1px solid rgba(255,255,255,0.15)', borderRadius: '8px 0 0 8px' }}
+                >
+                  {isSuiteRunning ? <Loader2 className="animate-spin" size={16} /> : null}
+                  Run Suite
+                </button>
+                <button
+                  onClick={() => { setShowRunDropdown(p => !p); setShowClearDropdown(false); }}
+                  disabled={isProcessing || Object.keys(groupedTests).length === 0}
+                  style={{ background: '#0f172a', color: '#fff', border: 'none', padding: '8px 10px', fontWeight: 700, fontSize: '0.75rem', cursor: 'pointer', borderRadius: '0 8px 8px 0' }}
+                >
+                  ▾
+                </button>
+              </div>
+              {showRunDropdown && Object.keys(groupedTests).length > 0 && (
+                <div style={{ position: 'absolute', top: 'calc(100% + 4px)', right: 0, background: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', boxShadow: '0 8px 24px rgba(0,0,0,0.12)', zIndex: 100, minWidth: '200px', overflow: 'hidden' }}>
+                  <div style={{ padding: '6px 12px', fontSize: '0.7rem', fontWeight: 800, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid #f1f5f9' }}>Run by batch</div>
+                  {Object.entries(groupedTests).map(([section, tests]) => (
+                    <button
+                      key={section}
+                      onClick={() => handleRunSection(section)}
+                      style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', padding: '8px 14px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.82rem', color: '#374151', fontWeight: 600, textAlign: 'left' }}
+                      onMouseEnter={e => e.currentTarget.style.background = '#f0fdf4'}
+                      onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                    >
+                      <span>{section}</span>
+                      <span style={{ fontSize: '0.7rem', color: '#94a3b8', fontWeight: 600 }}>({(tests as any[]).length})</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>}
+
           </div>
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-          {testResults['NL Ad-hoc Script Engine Trace'] && (
-            <div style={{ border: '1px solid #06b6d4', borderRadius: '12px', background: '#f0fdfa', overflow: 'hidden' }}>
-              <div style={{ padding: '1rem 1.25rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
-                onClick={() => setExpandedId(expandedId === 'nl-adhoc-card' ? null : 'nl-adhoc-card')}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem' }}>
-                  {testResults['NL Ad-hoc Script Engine Trace'].overall_status === 'PASSED' || testResults['NL Ad-hoc Script Engine Trace'].passed
-                    ? <CheckCircle2 color="#10b981" size={22} /> : <XCircle color="#ef4444" size={22} />}
-                  <div>
-                    <div style={{ fontWeight: 700, color: '#0f172a' }}>NL Ad-hoc Script Engine Trace</div>
-                    <div style={{ fontSize: '0.8rem', color: '#0891b2', fontWeight: 600 }}>Autonomous Step Execution — Headful (Live)</div>
-                  </div>
-                </div>
+
+          {/* ⚡ SWAPPED SWEEP: HISTORIC NATURAL LANGUAGE RUNS RENDERED AT THE TOP OF THE LIST STACK */}
+          {nlHistoricalRuns.length > 0 && (
+            <div style={{ marginBottom: '0.5rem' }}>
+              <div
+                onClick={() => toggleSection('nl_executions_section')}
+                style={{ 
+                  display: 'flex', 
+                  alignItems: 'center', 
+                  gap: '0.5rem', 
+                  padding: '0.6rem 0.75rem', 
+                  marginBottom: '0.5rem', 
+                  borderRadius: '8px', 
+                  background: '#f5f3ff', 
+                  border: '1px solid #ddd6fe', 
+                  cursor: 'pointer', 
+                  userSelect: 'none' 
+                }}
+              >
+                <Sparkles size={14} color="#7c3aed" />
+                <span style={{ fontSize: '0.75rem', fontWeight: 800, color: '#7c3aed', textTransform: 'uppercase', letterSpacing: '0.06em', flex: 1 }}>
+                  NL Executions
+                </span>
+                <span style={{ fontSize: '0.7rem', color: '#7c3aed', fontWeight: 600, marginRight: '0.5rem' }}>
+                  ({nlHistoricalRuns.length})
+                </span>
+                <span style={{ fontSize: '0.7rem', color: '#7c3aed', transition: 'transform 0.2s', display: 'inline-block', transform: expandedSections['nl_executions_section'] === false ? 'rotate(-90deg)' : 'rotate(0deg)' }}>▼</span>
               </div>
-              {expandedId === 'nl-adhoc-card' && (
-                <div style={{ padding: '1.25rem', borderTop: '1px solid #e2e8f0', background: '#ffffff' }}>
-                  {renderStepTrace(testResults['NL Ad-hoc Script Engine Trace'].step_results || [])}
-                  {<SlideshowPanel screenshots={testResults['NL Ad-hoc Script Engine Trace'].screenshots || []} videoBase64={testResults['NL Ad-hoc Script Engine Trace'].video_base64} />}
+              
+              {expandedSections['nl_executions_section'] !== false && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1rem' }}>
+                  {nlHistoricalRuns.map((runItem) => (
+                    <TestCard
+                      key={runItem.id}
+                      tc={runItem}
+                      result={testResults[runItem.title]}
+                      isExpanded={expandedId === runItem.id}
+                      isRunning={false}
+                      isProcessing={isProcessing}
+                      onExpand={() => setExpandedId(expandedId === runItem.id ? null : runItem.id)}
+                      onRun={null}
+                      onRemove={handleRemoveNL}
+                      renderStepTrace={renderStepTrace}
+                    />
+                  ))}
                 </div>
               )}
             </div>
           )}
 
+          {/* STANDARD ACCORDION GROUPS */}
           {stagedTests.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '4rem 0', color: '#94a3b8' }}>
-              <Layers size={40} style={{ opacity: 0.2, marginBottom: '1rem' }} />
-              <p style={{ fontWeight: 500 }}>No scenarios staged. Select items from Test Cases to begin.</p>
-            </div>
+            nlHistoricalRuns.length === 0 && (
+              <div style={{ textAlign: 'center', padding: '4rem 0', color: '#94a3b8' }}>
+                <Layers size={40} style={{ opacity: 0.2, marginBottom: '1rem' }} />
+                <p style={{ fontWeight: 500 }}>No scenarios staged. Select items from Test Cases to begin.</p>
+              </div>
+            )
           ) : (
             Object.entries(groupedTests).map(([section, tests]) => (
               <div key={section}>
@@ -522,7 +929,7 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
                       isRunning={processingId === tc.id}
                       isProcessing={isProcessing}
                       onExpand={() => setExpandedId(expandedId === tc.id ? null : tc.id)}
-                      onRun={handleSingleExecution}
+                      onRun={isReadOnly ? null : handleSingleExecution}
                       onRemove={handleRemoveSingle}
                       renderStepTrace={renderStepTrace}
                     />
@@ -532,6 +939,7 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
               </div>
             ))
           )}
+
         </div>
       </div>
 

@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
+import { useAuth } from '../context/AuthContext';
 import { apiService } from '../services/api';
 import { 
   Folder, 
@@ -22,47 +23,97 @@ interface DashboardProps {
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
-  const { applications, testCases, history, activeAppId, setActiveAppId, updateApplication, deleteApplication } = useApp();
-  
-  const [serverMetrics, setServerMetrics] = useState({
-    totalTestCases: 0,
-    aiGeneratedTests: 0,
-    manualAuthoredTests: 0,
-    overallPassRate: 100,
-    runningJobs: 0,
-    totalKnowledgeAssets: 0
-  });
-  const [loading, setLoading] = useState(true);
+  const { user } = useAuth();
+  const {
+    applications,
+    testCases,
+    history,
+    knowledgeAssets,
+    activeAppId,
+    setActiveAppId,
+    updateApplication,
+    deleteApplication
+  } = useApp();
 
+  const [showAccessModal, setShowAccessModal] = useState(false);
+  const [accessReason, setAccessReason] = useState('');
+  const [accessRequestedRole, setAccessRequestedRole] = useState<'qa_engineer' | 'developer'>('qa_engineer');
+  const [accessSubmitting, setAccessSubmitting] = useState(false);
+  const [accessError, setAccessError] = useState('');
+  const [accessSuccess, setAccessSuccess] = useState('');
+  const [myRequest, setMyRequest] = useState<any>(null);
+
+  const API_BASE = 'http://localhost:8000';
+  const authHeaders = { 'Content-Type': 'application/json' };
+
+  // Only qa_reviewer and developer can request upgrades
+  const canRequestUpgrade = user?.role === 'qa_reviewer' || user?.role === 'developer';
+
+  useEffect(() => {
+    if (user && canRequestUpgrade) {
+      fetch(`${API_BASE}/auth/role-request/mine`, { headers: authHeaders, credentials: 'include' })
+        .then(r => r.ok ? r.json() : [])
+        .then((data: any[]) => {
+          if (data.length > 0) {
+            const latest = data[0];
+            // If approved but user already has that role (re-logged in), clear the banner
+            if (latest.status === 'approved' && user.role === latest.requestedRole) {
+              setMyRequest(null);
+            } else {
+              setMyRequest(latest);
+            }
+          }
+        })
+        .catch(() => {});
+    } else {
+      setMyRequest(null); // clear for admin/qa_engineer
+    }
+  }, [user?.role]);
+
+  const handleSubmitAccessRequest = async () => {
+    setAccessError('');
+    if (accessReason.trim().length < 10) { setAccessError('Please provide a reason (at least 10 characters)'); return; }
+    setAccessSubmitting(true);
+    try {
+      const res = await fetch(`${API_BASE}/auth/role-request`, {
+        method: 'POST', headers: authHeaders, credentials: 'include',
+        body: JSON.stringify({ requestedRole: accessRequestedRole, reason: accessReason.trim() })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Failed to submit');
+      setMyRequest({ status: 'pending', requestedRole: accessRequestedRole, reason: accessReason.trim() });
+      setAccessSuccess('Request submitted! An admin will review it shortly.');
+      setAccessReason('');
+    } catch (e: any) {
+      setAccessError(e.message);
+    } finally {
+      setAccessSubmitting(false);
+    }
+  };
+  
+  // ⚡ DYNAMIC CLIENT DERIVATIONS - ALWAYS 100% IN SYNC WITH CURRENT APP WORKSPACE
+  const totalApps = applications.length;
+  const totalTestCases = testCases.length;
+  const aiGeneratedTests = testCases.filter(tc => tc.source === 'ai').length;
+  const manualAuthoredTests = testCases.filter(tc => tc.source === 'manual' || !tc.source).length;
+  const totalKnowledgeAssets = knowledgeAssets?.length || 0;
+
+  // Derive running jobs cleanly by inspecting active execution histories dynamically
+  const runningJobs = history.filter(run => run.status === 'running').length;
+
+  // Calculate the live success rating mathematically based on completed executions
+  const overallPassRate = useMemo(() => {
+    const completedRuns = history.filter(run => run.status === 'passed' || run.status === 'failed');
+    if (completedRuns.length === 0) return 100; // Default baseline index
+    const passedRuns = completedRuns.filter(run => run.status === 'passed').length;
+    return Math.round((passedRuns / completedRuns.length) * 100);
+  }, [history]);
+
+  const [loading, setLoading] = useState(false);
   const [isManageModalOpen, setIsManageModalOpen] = useState(false);
   const [editingAppId, setEditingAppId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const [editDesc, setEditDesc] = useState('');
-
-  useEffect(() => {
-    const fetchMetrics = async () => {
-      try {
-        const data = await apiService.getLiveDashboardMetrics();
-        if (data) {
-          setServerMetrics({
-            totalTestCases: data.totalTestCases ?? 0,
-            aiGeneratedTests: data.aiGeneratedTests ?? 0,
-            manualAuthoredTests: data.manualAuthoredTests ?? 0,
-            overallPassRate: data.overallPassRate ?? 100,
-            runningJobs: data.runningJobs ?? 0,
-            totalKnowledgeAssets: data.totalKnowledgeAssets ?? 0
-          });
-        }
-      } catch (err) {
-        console.error("Dashboard telemetry synchronization failed:", err);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchMetrics();
-  }, [applications, history, testCases]);
-
-  const totalApps = applications.length;
 
   const handleSelectApp = (appId: string) => {
     setActiveAppId(appId);
@@ -137,6 +188,122 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
         )}
       </div>
 
+      {/* ROLE ACCESS BANNER — shown for all users, actionable for non-admins */}
+      {user && (() => {
+        const ROLE_META: Record<string, { icon: string; chipBg: string; label: string }> = {
+          admin:        { icon: '👑', chipBg: '#fef3c7', label: 'Admin' },
+          qa_engineer:  { icon: '🧪', chipBg: '#dbeafe', label: 'QA Engineer' },
+          qa_reviewer:  { icon: '🔍', chipBg: 'rgba(255,255,255,0.15)', label: 'QA Reviewer' },
+          developer:    { icon: '💻', chipBg: 'rgba(255,255,255,0.15)', label: 'Developer' },
+        };
+        const meta = ROLE_META[user.role] || { icon: '👤', chipBg: 'rgba(255,255,255,0.15)', label: user.role };
+        const isNonAdmin = canRequestUpgrade; // only qa_reviewer and developer
+
+        return (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          background: isNonAdmin ? 'linear-gradient(135deg, #0f172a, #1e40af)' : 'rgba(255,255,255,0.6)',
+          backdropFilter: 'blur(12px)',
+          border: isNonAdmin ? 'none' : '1px solid rgba(255,255,255,0.7)',
+          borderRadius: '14px', padding: '0.9rem 1.4rem', marginBottom: '1.5rem',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.06)'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+            <div style={{ width: '36px', height: '36px', borderRadius: '10px', background: meta.chipBg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1.1rem' }}>
+              {meta.icon}
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: '0.9rem', color: isNonAdmin ? '#fff' : '#0f172a' }}>
+                {user.name}
+              </div>
+              <div style={{ fontSize: '0.75rem', color: isNonAdmin ? '#94a3b8' : '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600 }}>
+                {isNonAdmin && myRequest?.status === 'pending' ? '⏳ Upgrade Pending Review' :
+                 `Role: ${meta.label}`}
+              </div>
+            </div>
+          </div>
+
+          {isNonAdmin && (
+            myRequest?.status === 'pending' ? (
+              <div style={{ background: 'rgba(255,255,255,0.1)', borderRadius: '8px', padding: '6px 14px', fontSize: '0.8rem', color: '#fde68a', fontWeight: 600 }}>
+                Request under review
+              </div>
+            ) : (
+              <button
+                onClick={() => { setShowAccessModal(true); setAccessError(''); setAccessSuccess(''); }}
+                style={{ background: '#fff', color: '#0f172a', border: 'none', borderRadius: '8px', padding: '7px 16px', fontWeight: 700, fontSize: '0.82rem', cursor: 'pointer' }}
+              >
+                Request Higher Access →
+              </button>
+            )
+          )}
+        </div>
+        );
+      })()}
+
+      {/* ACCESS REQUEST MODAL */}
+      {showAccessModal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000 }}>
+          <div style={{ background: '#fff', borderRadius: '16px', padding: '2rem', width: '480px', boxShadow: '0 25px 60px rgba(0,0,0,0.3)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+              <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 800, color: '#0f172a' }}>Request Role Upgrade</h2>
+              <button onClick={() => setShowAccessModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8' }}><X size={20} /></button>
+            </div>
+
+            {/* Role picker */}
+            <p style={{ margin: '0 0 0.75rem', fontSize: '0.8rem', fontWeight: 700, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Which role are you requesting?</p>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1.25rem' }}>
+              {[
+                { role: 'qa_engineer' as const, icon: '🧪', label: 'QA Engineer', perks: ['AI test generation', 'Run executions', 'Knowledge base'] },
+                { role: 'developer' as const, icon: '💻', label: 'Developer', perks: ['View test results', 'App-scoped access', 'Read-only insights'] },
+              ].map(opt => (
+                <div
+                  key={opt.role}
+                  onClick={() => setAccessRequestedRole(opt.role)}
+                  style={{ border: `2px solid ${accessRequestedRole === opt.role ? '#1d4ed8' : '#e2e8f0'}`, borderRadius: '12px', padding: '1rem', cursor: 'pointer', background: accessRequestedRole === opt.role ? '#eff6ff' : '#fff', transition: 'all 0.15s' }}
+                >
+                  <div style={{ fontSize: '1.4rem', marginBottom: '0.4rem' }}>{opt.icon}</div>
+                  <div style={{ fontWeight: 800, fontSize: '0.875rem', color: '#0f172a', marginBottom: '0.5rem' }}>{opt.label}</div>
+                  {opt.perks.map(p => (
+                    <div key={p} style={{ fontSize: '0.75rem', color: '#64748b', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                      <span style={{ color: '#16a34a', fontWeight: 700 }}>✓</span> {p}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+
+            <label style={{ fontSize: '0.75rem', fontWeight: 700, color: '#374151', display: 'block', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+              Describe your use case
+            </label>
+            <textarea
+              value={accessReason}
+              onChange={e => setAccessReason(e.target.value)}
+              placeholder={accessRequestedRole === 'qa_engineer' ? "e.g. I'm joining the QA team and need to run automated test suites..." : "e.g. I'm a developer who needs to monitor test results for my application..."}
+              rows={3}
+              style={{ width: '100%', padding: '10px 14px', borderRadius: '8px', border: '1.5px solid #e2e8f0', fontSize: '0.875rem', resize: 'vertical', boxSizing: 'border-box', outline: 'none', fontFamily: 'inherit', marginBottom: '4px' }}
+            />
+            <div style={{ fontSize: '0.72rem', color: accessReason.length < 10 ? '#dc2626' : '#94a3b8', textAlign: 'right', marginBottom: '1rem' }}>
+              {accessReason.length} / 10 min characters
+            </div>
+
+            {accessError && <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '8px', padding: '8px 14px', color: '#dc2626', fontSize: '0.82rem', marginBottom: '1rem' }}>{accessError}</div>}
+            {accessSuccess && <div style={{ background: '#dcfce7', border: '1px solid #bbf7d0', borderRadius: '8px', padding: '8px 14px', color: '#166534', fontSize: '0.82rem', marginBottom: '1rem' }}>{accessSuccess}</div>}
+
+            <div style={{ display: 'flex', gap: '0.75rem' }}>
+              <button onClick={() => setShowAccessModal(false)} style={{ flex: 1, padding: '10px', borderRadius: '8px', border: '1px solid #e2e8f0', background: '#f8fafc', color: '#475569', fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
+              <button
+                onClick={handleSubmitAccessRequest}
+                disabled={accessSubmitting || accessReason.trim().length < 10 || !!accessSuccess}
+                style={{ flex: 2, padding: '10px', borderRadius: '8px', border: 'none', background: accessReason.trim().length < 10 || accessSuccess ? '#94a3b8' : '#0f172a', color: '#fff', fontWeight: 700, cursor: 'pointer' }}
+              >
+                {accessSubmitting ? 'Submitting...' : accessSuccess ? 'Submitted ✓' : `Request ${accessRequestedRole === 'qa_engineer' ? 'QA Engineer' : 'Developer'} Access`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* STATS TILES GLASS GRID - ROW 1 */}
       <div className="dashboard-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1.5rem', marginBottom: '1.5rem' }}>
         <div style={{ background: 'rgba(255, 255, 255, 0.6)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255, 255, 255, 0.7)', borderRadius: '20px', padding: '1.5rem', display: 'flex', alignItems: 'center', gap: '1.25rem', boxShadow: '0 10px 15px -3px rgba(15, 23, 42, 0.04)' }}>
@@ -150,7 +317,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
         <div style={{ background: 'rgba(255, 255, 255, 0.6)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255, 255, 255, 0.7)', borderRadius: '20px', padding: '1.5rem', display: 'flex', alignItems: 'center', gap: '1.25rem', boxShadow: '0 10px 15px -3px rgba(15, 23, 42, 0.04)' }}>
           <div style={{ background: '#ecfeff', color: '#06b6d4', padding: '12px', borderRadius: '12px' }}><Folder size={24} /></div>
           <div>
-            <span style={{ display: 'block', fontSize: '1.85rem', fontWeight: 800, color: '#0f172a', lineHeight: '1.2' }}>{serverMetrics.totalTestCases}</span>
+            <span style={{ display: 'block', fontSize: '1.85rem', fontWeight: 800, color: '#0f172a', lineHeight: '1.2' }}>{totalTestCases}</span>
             <span style={{ fontSize: '0.85rem', color: '#64748b', fontWeight: 600 }}>Total Test Suite Size</span>
           </div>
         </div>
@@ -158,7 +325,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
         <div style={{ background: 'rgba(255, 255, 255, 0.6)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255, 255, 255, 0.7)', borderRadius: '20px', padding: '1.5rem', display: 'flex', alignItems: 'center', gap: '1.25rem', boxShadow: '0 10px 15px -3px rgba(15, 23, 42, 0.04)' }}>
           <div style={{ background: '#f0fdf4', color: '#16a34a', padding: '12px', borderRadius: '12px' }}><FileCheck size={24} /></div>
           <div>
-            <span style={{ display: 'block', fontSize: '1.85rem', fontWeight: 800, color: '#0f172a', lineHeight: '1.2' }}>{serverMetrics.overallPassRate}%</span>
+            <span style={{ display: 'block', fontSize: '1.85rem', fontWeight: 800, color: '#0f172a', lineHeight: '1.2' }}>{overallPassRate}%</span>
             <span style={{ fontSize: '0.85rem', color: '#64748b', fontWeight: 600 }}>Average Success Rate</span>
           </div>
         </div>
@@ -166,7 +333,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
         <div style={{ background: 'rgba(255, 255, 255, 0.6)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255, 255, 255, 0.7)', borderRadius: '20px', padding: '1.5rem', display: 'flex', alignItems: 'center', gap: '1.25rem', boxShadow: '0 10px 15px -3px rgba(15, 23, 42, 0.04)' }}>
           <div style={{ background: '#fffbeb', color: '#d97706', padding: '12px', borderRadius: '12px' }}><Activity size={24} /></div>
           <div>
-            <span style={{ display: 'block', fontSize: '1.85rem', fontWeight: 800, color: '#0f172a', lineHeight: '1.2' }}>{serverMetrics.runningJobs}</span>
+            <span style={{ display: 'block', fontSize: '1.85rem', fontWeight: 800, color: '#0f172a', lineHeight: '1.2' }}>{runningJobs}</span>
             <span style={{ fontSize: '0.85rem', color: '#64748b', fontWeight: 600 }}>Running Agents</span>
           </div>
         </div>
@@ -177,7 +344,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
         <div style={{ background: 'rgba(255, 255, 255, 0.6)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255, 255, 255, 0.7)', borderRadius: '20px', padding: '1.25rem', display: 'flex', alignItems: 'center', gap: '1rem', boxShadow: '0 10px 15px -3px rgba(15, 23, 42, 0.04)' }}>
           <div style={{ background: '#eff6ff', color: '#3b82f6', padding: '10px', borderRadius: '10px' }}><PenSquare size={20} /></div>
           <div>
-            <span style={{ display: 'block', fontSize: '1.5rem', fontWeight: 800, color: '#0f172a' }}>{serverMetrics.manualAuthoredTests}</span>
+            <span style={{ display: 'block', fontSize: '1.5rem', fontWeight: 800, color: '#0f172a' }}>{manualAuthoredTests}</span>
             <span style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 500 }}>Manual Authored</span>
           </div>
         </div>
@@ -185,7 +352,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
         <div style={{ background: 'rgba(255, 255, 255, 0.6)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255, 255, 255, 0.7)', borderRadius: '20px', padding: '1.25rem', display: 'flex', alignItems: 'center', gap: '1rem', boxShadow: '0 10px 15px -3px rgba(15, 23, 42, 0.04)' }}>
           <div style={{ background: '#ecfeff', color: '#06b6d4', padding: '10px', borderRadius: '10px' }}><Bot size={20} /></div>
           <div>
-            <span style={{ display: 'block', fontSize: '1.5rem', fontWeight: 800, color: '#0f172a' }}>{serverMetrics.aiGeneratedTests}</span>
+            <span style={{ display: 'block', fontSize: '1.5rem', fontWeight: 800, color: '#0f172a' }}>{aiGeneratedTests}</span>
             <span style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 500 }}>AI Generated</span>
           </div>
         </div>
@@ -193,7 +360,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
         <div style={{ background: 'rgba(255, 255, 255, 0.6)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255, 255, 255, 0.7)', borderRadius: '20px', padding: '1.25rem', display: 'flex', alignItems: 'center', gap: '1rem', boxShadow: '0 10px 15px -3px rgba(15, 23, 42, 0.04)' }}>
           <div style={{ background: '#f5f3ff', color: '#7c3aed', padding: '10px', borderRadius: '10px' }}><BookOpen size={20} /></div>
           <div>
-            <span style={{ display: 'block', fontSize: '1.5rem', fontWeight: 800, color: '#0f172a' }}>{serverMetrics.totalKnowledgeAssets}</span>
+            <span style={{ display: 'block', fontSize: '1.5rem', fontWeight: 800, color: '#0f172a' }}>{totalKnowledgeAssets}</span>
             <span style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 500 }}>Grounding Contexts</span>
           </div>
         </div>
