@@ -505,6 +505,94 @@ async def get_latest_execution_report(run_id: int, current_user=Depends(get_curr
     return HTMLResponse(content=_generate_html_report(run, er, exec_results))
 
 
+
+
+@router.delete("/app/{app_id}/all")
+async def delete_all_for_app(app_id: str, current_user=Depends(get_current_user)):
+    """
+    Clear All for Execution Lab — ONLY wipes ExecutionRun + ExecutionResult rows
+    (screenshots, videos, step traces). Never touches TestRun or TestResult rows
+    so the Test Cases section is always unaffected.
+
+    Role-based scoping:
+      admin       → deletes ALL execution history for the app (every user's runs)
+      qa_engineer → deletes only execution runs they created + any orphaned runs
+                    (QA Reviewer sees nothing after this since their view is derived
+                     from qa_engineer-created runs)
+      developer   → deletes only their own execution runs
+      qa_reviewer → read-only, cannot clear
+    """
+    if current_user.role == "qa_reviewer":
+        raise HTTPException(status_code=403, detail="QA Reviewers cannot clear execution history.")
+
+    # ── 1. Determine which TestRun IDs this user is allowed to wipe ─────────
+    # We scope by TestRun because ExecutionRun.runId → TestRun.id is the link.
+    if current_user.role == "admin":
+        # Admin sees everything for this app
+        scoped_runs = await db.testrun.find_many(where={"appId": app_id})
+    elif current_user.role == "qa_engineer":
+        # QA engineer wipes runs they created (visibility "qa_and_reviewer" + "all" they own)
+        scoped_runs = await db.testrun.find_many(where={
+            "appId": app_id,
+            "createdByUserId": current_user.id
+        })
+    else:  # developer
+        scoped_runs = await db.testrun.find_many(where={
+            "appId": app_id,
+            "createdByUserId": current_user.id
+        })
+
+    scoped_run_ids = {r.id for r in scoped_runs}
+
+    # ── 2. Fetch ExecutionRuns linked to those TestRuns ──────────────────────
+    exec_runs_to_delete = await db.executionrun.find_many(
+        where={"runId": {"in": list(scoped_run_ids)}}
+    ) if scoped_run_ids else []
+
+    # ── 3. Also grab orphaned ExecutionRuns (runId is None or points to a
+    #       deleted TestRun) — these are always safe to wipe for any role ─────
+    all_exec_runs = await db.executionrun.find_many()
+    all_testrun_ids = {r.id for r in await db.testrun.find_many(where={"appId": app_id})}
+    orphaned = [
+        er for er in all_exec_runs
+        if er.runId is None or er.runId not in all_testrun_ids
+    ]
+
+    runs_to_wipe = list({er.id: er for er in (exec_runs_to_delete + orphaned)}.values())
+
+    # ── 4. Delete ExecutionResult rows + media files for each ExecutionRun ───
+    for er in runs_to_wipe:
+        exec_results = await db.executionresult.find_many(where={"executionRunId": er.id})
+        for result in exec_results:
+            # Delete per-step screenshots
+            try:
+                step_results = json.loads(result.stepResults) if result.stepResults else []
+                for step in step_results:
+                    _delete_media_file(step.get("image_path"))
+            except Exception:
+                pass
+            # Delete screenshotPaths list
+            try:
+                paths = json.loads(result.screenshotPaths) if result.screenshotPaths else []
+                for p in paths:
+                    _delete_media_file(p)
+            except Exception:
+                pass
+            # Delete video
+            _delete_media_file(result.videoPath)
+        await db.executionresult.delete_many(where={"executionRunId": er.id})
+        await db.executionrun.delete(where={"id": er.id})
+
+    # ── 5. TestRun and TestResult rows are intentionally NOT deleted ──────────
+    # The Test Cases section reads from TestRun/TestResult and must be unaffected
+    # by clearing the Execution Lab.
+
+    return {
+        "message": f"Execution history cleared for app {app_id}",
+        "execution_runs_deleted": len(runs_to_wipe),
+        "role": current_user.role
+    }
+
 @router.delete("/{run_id}")
 async def delete_run(run_id: int, current_user=Depends(get_current_user)):
     """Delete a test run and all its artifacts (DB rows + disk files)."""
@@ -558,14 +646,12 @@ async def delete_execution_results_by_title(
         }
     )
 
+    # Clean up empty ExecutionRun shells — but NEVER touch TestRun or TestResult.
+    # The Test Cases section owns those rows and must not be affected by execution clears.
     for er in execution_runs:
         remaining = await db.executionresult.find_many(where={"executionRunId": er.id})
         if not remaining:
             await db.executionrun.delete(where={"id": er.id})
-            sibling_runs = await db.executionrun.find_many(where={"runId": er.runId})
-            if not sibling_runs:
-                await db.testresult.delete_many(where={"runId": er.runId})
-                await db.testrun.delete(where={"id": er.runId})
 
     return {"deleted_count": deleted_count, "message": f"Deleted {deleted_count} execution result(s)"}
 
