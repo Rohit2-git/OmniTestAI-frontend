@@ -161,3 +161,11 @@ Desktop.ini
 *.njsproj
 *.sln
 *.sw?
+
+# Runtime media artifacts
+media/
+*.mp4
+*.webm
+*.png
+*.jpeg
+*.jpg
