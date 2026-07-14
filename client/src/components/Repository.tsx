@@ -15,7 +15,7 @@ export const Repository: React.FC<RepositoryProps> = ({ setActiveTab, setSelecte
 
   const [activeFolder, setActiveFolder] = useState<string>('All Modules');
   const [searchQuery, setSearchQuery] = useState('');
-  const [priorityFilter, setPriorityFilter] = useState<string>('All');
+  const [priorityFilter] = useState<string>('All');
   
   const [selectedTestCase, setSelectedTestCase] = useState<TestCase | null>(null);
   const [selectedTests, setSelectedTests] = useState<string[]>([]);

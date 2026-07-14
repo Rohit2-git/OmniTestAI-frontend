@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import asyncio as _asyncio
 from typing import Any, List
 from datetime import datetime
@@ -56,6 +57,61 @@ def _extract_tokens(response) -> dict:
         return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
 
+def _repair_truncated_step_json(raw: str) -> dict | None:
+    """
+    Pass 2 responses occasionally get cut off mid-way through the "steps"
+    array — genuinely long multi-page flows (full checkout, multi-item
+    end-to-end journeys) can exceed the output token budget even with a
+    forced JSON schema. Discarding the whole test case and asking the user
+    to regenerate wastes the tokens already spent generating everything up
+    to the cutoff. Salvage whatever complete steps made it through instead —
+    a partial-but-real 6-step test case is more useful than nothing, and
+    costs nothing extra to recover.
+    """
+    m = re.search(r'"steps"\s*:\s*\[(.*)', raw, re.DOTALL)
+    if not m:
+        return None
+    array_blob = m.group(1)
+    # Only fully-closed quoted strings match here — a truncated trailing
+    # element (cut off before its closing quote) simply never gets captured,
+    # which is exactly the "drop the incomplete last step" behavior we want.
+    steps = re.findall(r'"((?:[^"\\]|\\.)*)"', array_blob)
+    steps = [s.replace('\\"', '"').replace('\\n', ' ').strip() for s in steps if s.strip()]
+    if len(steps) < 2:
+        return None
+    result = {"steps": steps}
+    title_m = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
+    if title_m:
+        result["title"] = title_m.group(1)
+    return result
+
+
+def _repair_truncated_blueprints_json(raw: str) -> list | None:
+    """
+    Same truncation problem as Pass 2's steps array, but for Pass 1's
+    blueprint list — salvages every fully-formed {title, type, objective}
+    object that made it through before a cutoff. A truncated trailing object
+    (cut off mid-field) simply won't match this pattern and gets dropped,
+    same "keep only what's complete" behavior as the Pass 2 repair.
+    """
+    pattern = re.compile(
+        r'\{\s*"title"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"type"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"objective"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}',
+        re.DOTALL
+    )
+    matches = pattern.findall(raw)
+    if not matches:
+        return None
+    blueprints = [
+        {
+            "title": title.replace('\\"', '"').strip(),
+            "type": btype.strip(),
+            "objective": objective.replace('\\"', '"').strip(),
+        }
+        for title, btype, objective in matches
+    ]
+    return blueprints if blueprints else None
+
+
 def _safe_parse_json(raw: str) -> Any:
     if not raw:
         raise ValueError("Empty response from Gemini")
@@ -105,8 +161,9 @@ class ExpandedTestCaseSchema(BaseModel):
 
 def _build_pass1_prompt(context: str = None, count: int = 20) -> str:
     context_section = f"\nContext Details:\n{context}" if context else ""
+    max_per_feature = max(1, count // 4)
     return f"""You are a Principal QA Architect.{context_section}
-Analyze ALL provided application inputs (screenshots, requirements, wireframes) and extract exactly {count} distinct core test case blueprints.
+Analyze ALL provided application inputs (screenshots, requirements, wireframes) and generate EXACTLY {count} distinct test case blueprints. This is a hard requirement — you MUST return exactly {count} blueprints, no more, no less.
 
 ━━━ STEP 1 — FEATURE INVENTORY (do this mentally before generating any blueprints) ━━━
 First, identify EVERY distinct feature area / page visible across ALL inputs. For example:
@@ -123,7 +180,7 @@ List every area you can see. Do NOT skip areas just because they seem secondary.
 
 ━━━ STEP 2 — PROPORTIONAL DISTRIBUTION (hard rule) ━━━
 Divide the {count} blueprints proportionally across ALL feature areas you identified.
-- NO single feature area may account for more than 25% of the total blueprints (i.e. max {max(1, count // 4)} out of {count}), UNLESS the entire input is about only that one feature.
+- NO single feature area may account for more than 25% of the total blueprints (i.e. max {max_per_feature} out of {count}), UNLESS the entire input is about only that one feature.
 - Authentication / login scenarios are ONE feature area — count ALL login variants (valid login, locked user, invalid credentials, empty fields, case sensitivity, SQL injection, keyboard nav, etc.) together toward that 25% cap.
 - Spread the remaining 75%+ across the other feature areas: cart actions, navigation, sorting, product details, logout, checkout, etc.
 
@@ -132,8 +189,19 @@ Divide the {count} blueprints proportionally across ALL feature areas you identi
 - Do NOT generate more than 2 blueprints that are minor variations of the same action on the same page (e.g. "empty username" and "empty password" count as 2 login-page variants and that's enough for that sub-area).
 - Prioritize cross-feature user journeys: add to cart → view cart → checkout; login → browse → logout; open sidebar → click nav link → land on page.
 
-🚨 DEMO LIMIT DIRECTIVE: 
-If the requested count is low (e.g., 5), pick one high-impact test from EACH of the top distinct feature areas rather than multiple variants of the same feature."""
+━━━ STEP 4 — REACHING THE EXACT COUNT (CRITICAL) ━━━
+You MUST generate exactly {count} blueprints. If you are running out of obvious scenarios, use these strategies to fill remaining slots — DO NOT stop early:
+- Boundary/edge cases: empty states, maximum values, special characters in inputs, very long strings
+- Error recovery flows: what happens after a failed action, retry behavior, back navigation
+- Negative tests: invalid data, wrong credentials, out-of-stock items, missing required fields
+- UI interaction variations: keyboard navigation, sorting in both directions (A→Z and Z→A), different filter combinations
+- Cross-feature sequences: login then perform action then logout, add multiple items then remove one
+- Permission/role behaviors: locked-out user types, guest vs logged-in states
+- State persistence: does cart survive navigation? does filter reset on page reload?
+
+If you have covered all obvious scenarios and still need more blueprints to reach {count}, generate increasingly specific edge case and boundary condition tests. It is ALWAYS better to include a niche edge case than to return fewer than {count} blueprints.
+
+🚨 FINAL REMINDER: Your response MUST contain exactly {count} blueprint objects. Returning fewer than {count} is a critical failure. Count your blueprints before submitting."""
 
 
 def _build_pass2_prompt(title: str, test_type: str, objective: str, context: str = None, test_data: dict = None, base_url: str = None) -> str:
@@ -238,7 +306,7 @@ async def discover_test_blueprints(
         temperature=0.1,
         response_mime_type="application/json",
         response_schema=BlueprintListSchema,
-        max_output_tokens=2000
+        max_output_tokens=6144
     )
 
     for attempt in range(3):
@@ -261,9 +329,75 @@ async def discover_test_blueprints(
                 "output_tokens": tokens["output_tokens"],
                 "total_tokens": tokens["total_tokens"],
             })
-            parsed = _safe_parse_json(response.text)
-            blueprints = parsed.get("blueprints", parsed) if isinstance(parsed, dict) else parsed
+            try:
+                parsed = _safe_parse_json(response.text)
+                blueprints = parsed.get("blueprints", parsed) if isinstance(parsed, dict) else parsed
+            except ValueError:
+                blueprints = _repair_truncated_blueprints_json(response.text)
+                if blueprints is None:
+                    raise
+                print(f"[Pass 1 recovery] Salvaged {len(blueprints)}/{count} complete blueprints from a "
+                      f"truncated response — used instead of retrying.")
             if blueprints and isinstance(blueprints, list):
+                # ── Count enforcement: if Gemini returned fewer than requested,
+                # run a targeted top-up call asking specifically for the gap ──
+                if len(blueprints) < count:
+                    shortfall = count - len(blueprints)
+                    print(f"[Pass 1] Got {len(blueprints)}/{count} blueprints — requesting {shortfall} more via top-up call.")
+                    existing_titles = [b.get("title", "") for b in blueprints]
+                    topup_prompt = f"""You are a Principal QA Architect.
+A previous generation pass produced {len(blueprints)} test blueprints for an application, but {count} were requested.
+You must generate exactly {shortfall} ADDITIONAL blueprints that are completely different from the ones already created.
+
+Already generated titles (DO NOT repeat or closely paraphrase any of these):
+{chr(10).join(f'- {t}' for t in existing_titles)}
+
+Generate {shortfall} new blueprints covering scenarios NOT yet covered above.
+Focus on: edge cases, boundary conditions, error recovery, negative tests, cross-feature flows, 
+permission/role behaviors, state persistence, UI interaction variations (keyboard nav, sorting, filtering).
+Be creative — niche edge cases are valid and valuable.
+
+You MUST return exactly {shortfall} blueprint objects. Each must be meaningfully different from the list above."""
+
+                    topup_contents = [topup_prompt]
+                    for img in all_image_parts:
+                        topup_contents.append(img)
+
+                    try:
+                        topup_response = await _asyncio.to_thread(
+                            client.models.generate_content,
+                            model="gemini-3-flash-preview",
+                            contents=topup_contents,
+                            config=types.GenerateContentConfig(
+                                temperature=0.4,  # Higher temp for more creative edge cases
+                                response_mime_type="application/json",
+                                response_schema=BlueprintListSchema,
+                                max_output_tokens=4096
+                            )
+                        )
+                        topup_tokens = _extract_tokens(topup_response)
+                        _append_token_log({
+                            "id": f"gen-p1-topup-{int(datetime.utcnow().timestamp()*1000)}",
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "type": "generation_pass1_topup",
+                            "model": "gemini-3-flash-preview",
+                            "app_id": app_id,
+                            "batch_label": batch_label,
+                            "input_tokens": topup_tokens["input_tokens"],
+                            "output_tokens": topup_tokens["output_tokens"],
+                            "total_tokens": topup_tokens["total_tokens"],
+                        })
+                        try:
+                            topup_parsed = _safe_parse_json(topup_response.text)
+                            topup_blueprints = topup_parsed.get("blueprints", topup_parsed) if isinstance(topup_parsed, dict) else topup_parsed
+                        except ValueError:
+                            topup_blueprints = _repair_truncated_blueprints_json(topup_response.text) or []
+                        if topup_blueprints and isinstance(topup_blueprints, list):
+                            blueprints = blueprints + topup_blueprints
+                            print(f"[Pass 1 top-up] Added {len(topup_blueprints)} blueprints → total now {len(blueprints)}")
+                    except Exception as topup_err:
+                        print(f"[Pass 1 top-up error] {topup_err} — continuing with {len(blueprints)} blueprints")
+
                 return blueprints[:count]
         except Exception as e:
             if attempt == 2:
@@ -306,7 +440,8 @@ async def expand_single_test_case(
     app_id: str = None,
     batch_label: str = None,
     test_data: dict = None,
-    base_url: str = None
+    base_url: str = None,
+    image_parts: List[Any] = None
 ) -> dict:
     import re as _re
     raw_objective = blueprint.get("objective", "Validate feature behavior.")
@@ -326,19 +461,28 @@ async def expand_single_test_case(
         base_url=base_url
     )
 
+    # Pass 2 previously wrote steps blind — title/objective text only, no visual
+    # grounding at all. That's fine for well-known UIs the model already "knows"
+    # from pretraining, but for anything app-specific it was guessing. Same
+    # screenshots Pass 1 used for blueprint discovery are passed here too, so
+    # step-writing can actually look at the real page instead of assuming
+    # generic patterns like a search bar that may not exist.
+    contents = [prompt] + list(image_parts) if image_parts else prompt
+
     config = types.GenerateContentConfig(
         temperature=0.1,
         response_mime_type="application/json",
         response_schema=ExpandedTestCaseSchema,
-        max_output_tokens=1500
+        max_output_tokens=8192
     )
 
+    last_error = None
     for attempt in range(3):
         try:
             response = await _asyncio.to_thread(
                 client.models.generate_content,
                 model="gemini-3-flash-preview",
-                contents=prompt,
+                contents=contents,
                 config=config
             )
             tokens = _extract_tokens(response)
@@ -354,7 +498,15 @@ async def expand_single_test_case(
                 "output_tokens": tokens["output_tokens"],
                 "total_tokens": tokens["total_tokens"],
             })
-            parsed = _safe_parse_json(response.text)
+            try:
+                parsed = _safe_parse_json(response.text)
+            except ValueError:
+                repaired = _repair_truncated_step_json(response.text)
+                if repaired is None:
+                    raise
+                print(f"[Pass 2 recovery] Salvaged {len(repaired['steps'])} complete steps from a "
+                      f"truncated response for '{blueprint.get('title', 'Untitled')}' — used instead of retrying.")
+                parsed = repaired
             steps = parsed.get("steps", [])
             _SKIP_PREFIXES = (
                 'verify', 'assert', 'confirm that', 'check that', 'ensure', 'validate',
@@ -373,32 +525,35 @@ async def expand_single_test_case(
                 parsed["expected_result"] = raw_objective
             return parsed
         except Exception as e:
+            last_error = e
+            # Previously silent — a failure here meant no one ever found out why,
+            # they just saw a broken "Search for X" test case with no explanation.
+            print(f"[Pass 2 generation error] attempt {attempt + 1}/3, blueprint "
+                  f"'{blueprint.get('title', 'Untitled')}': {type(e).__name__}: {e}")
             if attempt < 2:
                 await _asyncio.sleep(0.5)
                 continue
             title = blueprint.get("title", "Untitled")
-            search_term = title.split()[0] if title else "the topic"
-            # Generic fallback that stays 100% executable: navigate then search.
-            # Ends on the last real action — no trailing no-op "Observe" step.
-            # expected_result carries what success looks like instead.
+            # Previous fallback fabricated a full "Navigate → Search for X → Press
+            # Enter" sequence guessing at UI that may not exist — that guaranteed
+            # a wasted, billable execution run chasing a non-existent search bar.
+            # Being honest costs nothing and doesn't burn execution tokens: a
+            # single real navigate step, clearly flagged, so it's obvious at a
+            # glance this test case needs to be regenerated rather than run.
             return {
-                "title": title,
-                "steps": [
-                    "Navigate to the application homepage",
-                    f"Search for '{search_term}'",
-                    "Press Enter"
-                ],
-                "expected_result": raw_objective,
+                "title": f"⚠️ Generation failed — {title}",
+                "steps": [f"Navigate to {base_url}" if base_url else "Navigate to the application homepage"],
+                "expected_result": f"Automatic step generation failed after 3 attempts ({type(last_error).__name__}: {str(last_error)[:150]}). Please regenerate this test case.",
                 "type": blueprint.get("type", "positive")
             }
 
 
-async def _expand_all(blueprints: list, context: str = None, app_id: str = None, batch_label: str = None, base_url: str = None) -> list:
+async def _expand_all(blueprints: list, context: str = None, app_id: str = None, batch_label: str = None, base_url: str = None, image_parts: List[Any] = None) -> list:
     semaphore = _asyncio.Semaphore(4)
     async def _expand_one(bp):
         async with semaphore:
             await _asyncio.sleep(0.1)
-            return await expand_single_test_case(bp, context, app_id=app_id, batch_label=batch_label, base_url=base_url)
+            return await expand_single_test_case(bp, context, app_id=app_id, batch_label=batch_label, base_url=base_url, image_parts=image_parts)
     return list(await _asyncio.gather(*[_expand_one(bp) for bp in blueprints]))
 
 
@@ -409,7 +564,7 @@ async def generate_test_cases_from_text(content: str, context: str = None, count
 async def generate_test_cases_from_image(image_bytes: bytes, media_type: str, context: str = None, count: int = 20, app_id: str = None, batch_label: str = None, base_url: str = None) -> list:
     image_part = types.Part.from_bytes(data=image_bytes, mime_type=media_type)
     blueprints = await discover_test_blueprints(image_part=image_part, context=context, count=count, app_id=app_id, batch_label=batch_label)
-    return await _expand_all(blueprints, context, app_id=app_id, batch_label=batch_label, base_url=base_url)
+    return await _expand_all(blueprints, context, app_id=app_id, batch_label=batch_label, base_url=base_url, image_parts=[image_part])
 
 async def generate_test_cases_from_images(image_list: list, context: str = None, count: int = 20, app_id: str = None, batch_label: str = None, base_url: str = None) -> list:
     """Multi-image variant: image_list is a list of (image_bytes, media_type) tuples.
@@ -418,15 +573,15 @@ async def generate_test_cases_from_images(image_list: list, context: str = None,
     picked when multiple screenshots cover different features."""
     image_parts = [types.Part.from_bytes(data=b, mime_type=mt) for b, mt in image_list]
     blueprints = await discover_test_blueprints(image_parts=image_parts, context=context, count=count, app_id=app_id, batch_label=batch_label)
-    return await _expand_all(blueprints, context, app_id=app_id, batch_label=batch_label, base_url=base_url)
+    return await _expand_all(blueprints, context, app_id=app_id, batch_label=batch_label, base_url=base_url, image_parts=image_parts)
 
 async def generate_test_cases_from_both(content: str, image_bytes: bytes, media_type: str, context: str = None, count: int = 20, app_id: str = None, batch_label: str = None, base_url: str = None) -> list:
     image_part = types.Part.from_bytes(data=image_bytes, mime_type=media_type)
     blueprints = await discover_test_blueprints(content=content, image_part=image_part, context=context, count=count, app_id=app_id, batch_label=batch_label)
-    return await _expand_all(blueprints, context, app_id=app_id, batch_label=batch_label, base_url=base_url)
+    return await _expand_all(blueprints, context, app_id=app_id, batch_label=batch_label, base_url=base_url, image_parts=[image_part])
 
 async def generate_test_cases_from_both_multi(content: str, image_list: list, context: str = None, count: int = 20, app_id: str = None, batch_label: str = None, base_url: str = None) -> list:
     """Multi-image + text variant: image_list is a list of (image_bytes, media_type) tuples."""
     image_parts = [types.Part.from_bytes(data=b, mime_type=mt) for b, mt in image_list]
     blueprints = await discover_test_blueprints(content=content, image_parts=image_parts, context=context, count=count, app_id=app_id, batch_label=batch_label)
-    return await _expand_all(blueprints, context, app_id=app_id, batch_label=batch_label, base_url=base_url)
+    return await _expand_all(blueprints, context, app_id=app_id, batch_label=batch_label, base_url=base_url, image_parts=image_parts)

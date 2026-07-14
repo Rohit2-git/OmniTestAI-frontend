@@ -1,4 +1,10 @@
-const BASE_URL = 'http://localhost:8000';
+// Falls back to localhost:8000 for local dev (npm run dev). In the Docker
+// build, VITE_API_BASE_URL is injected at build time as "/api" (see
+// client/Dockerfile), routed to the backend by nginx. Must use the exact
+// same env var name as AuthContext.tsx and Executor.tsx - a mismatch here
+// means this file silently keeps calling localhost in production while
+// everything else correctly uses the proxy.
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
 export const apiService = {
   /**

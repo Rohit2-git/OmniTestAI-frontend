@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import type { Application, TestCase, ExecutionRun, KnowledgeAsset } from '../types';
 import { apiService } from '../services/api';
 
-const API_BASE = 'http://localhost:8000';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
 interface AppContextType {
   applications: Application[];
@@ -114,23 +114,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode; userRole?: strin
     syncAndFetch();
   }, [userRole]);
 
-  // ── Test cases: load from DB, fall back to localStorage ──────────────
-  const [testCases, setTestCases] = useState<TestCase[]>(() => {
-    const saved = localStorage.getItem('ai_agent_testcases');
-    return saved ? JSON.parse(saved) : [];
-  });
+  // ── Test cases: DB is the sole source of truth ────────────────────────
+  // Deliberately NOT hydrated from localStorage. These counts are scoped
+  // per user/role/app-access on the backend (see results.py), and this key
+  // is a plain browser-wide string with no per-user namespace — hydrating
+  // from it on mount showed whatever a DIFFERENT, previously-logged-in user
+  // on this same browser had cached (e.g. a QA Reviewer with zero assigned
+  // apps briefly/persistently seeing another user's real 9 test cases).
+  // Starting empty and letting fetchFromDB populate it is slightly slower
+  // to first paint but can never leak another account's data.
+  const [testCases, setTestCases] = useState<TestCase[]>([]);
 
-  // ── History: load from DB, fall back to localStorage ─────────────────
-  const [history, setHistory] = useState<ExecutionRun[]>(() => {
-    const saved = localStorage.getItem('ai_agent_history');
-    return saved ? JSON.parse(saved) : [];
-  });
+  // ── History: same reasoning as testCases above ────────────────────────
+  const [history, setHistory] = useState<ExecutionRun[]>([]);
 
-  // ── Knowledge assets ──────────────────────────────────────────────────
-  const [knowledgeAssets, setKnowledgeAssets] = useState<KnowledgeAsset[]>(() => {
-    const saved = localStorage.getItem('ai_agent_knowledge_assets');
-    return saved ? JSON.parse(saved) : [];
-  });
+  // ── Knowledge assets: same reasoning as testCases above ───────────────
+  const [knowledgeAssets, setKnowledgeAssets] = useState<KnowledgeAsset[]>([]);
 
   const [activeAppId, setActiveAppId] = useState<string | null>(() => {
     const saved = localStorage.getItem('ai_agent_active_appid');
@@ -141,6 +140,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode; userRole?: strin
   // ── Fetch test cases + execution history from DB on mount ─────────────
   // Exposed so callers (e.g. Generator after Save to Repo) can force a refresh
   // without reloading the page. Defined outside the useEffect so it's reachable.
+  // Immediately drop any previous session's account-scoped state the moment
+  // the logged-in role changes (e.g. logout/login in the same tab without a
+  // full page reload) — so a new user never even briefly sees whatever was
+  // in memory for whoever was logged in before. The DB fetch below then
+  // repopulates from scratch, scoped correctly to the new user.
+  // One-time cleanup: these three keys were written by the pre-fix version of
+  // this file and may still hold another user's leaked data in browsers that
+  // already hit this bug. They're no longer used — remove them outright so
+  // nothing lingers, rather than leaving dead but sensitive data sitting in
+  // localStorage indefinitely.
+  useEffect(() => {
+    localStorage.removeItem('ai_agent_testcases');
+    localStorage.removeItem('ai_agent_history');
+    localStorage.removeItem('ai_agent_knowledge_assets');
+  }, []);
+
+  useEffect(() => {
+    setTestCases([]);
+    setHistory([]);
+    setKnowledgeAssets([]);
+  }, [userRole]);
+
   const fetchFromDB = async () => {
     if (!userRole) return;
     try {
@@ -215,13 +236,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode; userRole?: strin
         const localOnly = prev.filter(tc => !tc.id.startsWith('db-') && !dbIds.has(tc.id));
         return [...allTestCases, ...localOnly];
       });
-      if (allHistory.length > 0) {
-        setHistory(prev => {
-          const dbIds = new Set(allHistory.map(h => h.id));
-          const localOnly = prev.filter(h => !h.id.startsWith('exec-') && !dbIds.has(h.id));
-          return [...allHistory, ...localOnly];
-        });
-      }
+      setHistory(prev => {
+        const dbIds = new Set(allHistory.map(h => h.id));
+        const localOnly = prev.filter(h => !h.id.startsWith('exec-') && !dbIds.has(h.id));
+        return [...allHistory, ...localOnly];
+      });
     } catch (err) {
       console.error('DB sync error:', err);
     }
@@ -233,24 +252,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode; userRole?: strin
 
   // Fetch knowledge assets from DB when active app changes
   useEffect(() => {
-    if (!userRole || !activeAppId) return;
+    if (!userRole || !activeAppId) {
+      // No active app (e.g. this user has zero assigned applications) —
+      // there is nothing to show, so make sure state reflects that instead
+      // of leaving behind whatever was fetched for a previously active app.
+      setKnowledgeAssets([]);
+      return;
+    }
     fetch(`${API_BASE}/knowledge/${activeAppId}`, { headers: authHeaders, credentials: 'include' })
       .then(r => r.ok ? r.json() : null)
       .then(data => {
-        if (data?.assets?.length > 0) {
-          setKnowledgeAssets(data.assets.map((a: any) => ({
-            id: `kb-db-${a.id}`,
-            appId: activeAppId,
-            name: a.name,
-            type: a.type || 'doc',
-            summary: a.summary,
-            url: a.url || undefined,
-            tags: typeof a.tags === 'string' ? JSON.parse(a.tags || '[]') : (a.tags || []),
-            createdAt: a.createdAt || new Date().toISOString()
-          })));
-        }
+        // Always replace — including clearing to [] when this app genuinely
+        // has zero assets — so a real "0" is never masked by stale state
+        // left over from a previously active app or a previous user.
+        const assets = data?.assets || [];
+        setKnowledgeAssets(assets.map((a: any) => ({
+          id: `kb-db-${a.id}`,
+          appId: activeAppId,
+          name: a.name,
+          type: a.type || 'doc',
+          summary: a.summary,
+          url: a.url || undefined,
+          tags: typeof a.tags === 'string' ? JSON.parse(a.tags || '[]') : (a.tags || []),
+          createdAt: a.createdAt || new Date().toISOString()
+        })));
       })
-      .catch(() => { });
+      .catch(() => { setKnowledgeAssets([]); });
   }, [activeAppId, userRole]);
 
   const [generationBatches, setGenerationBatches] = useState<any[]>(() => {
@@ -296,36 +323,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode; userRole?: strin
       try { localStorage.removeItem('ai_agent_applications'); } catch { }
     }
   }, [allApplications]);
-  useEffect(() => {
-    try {
-      localStorage.setItem('ai_agent_testcases', JSON.stringify(testCases));
-    } catch (e) {
-      // localStorage has a hard ~5-10MB quota. testCases is fully DB-backed
-      // (see the fetch-on-mount effect above), so localStorage here is only
-      // ever an instant-load cache — if it's too big to persist, drop the
-      // cache entirely rather than crash the whole app. Nothing is lost:
-      // the next reload just re-fetches everything from the database instead
-      // of showing the cached copy for a split second first.
-      console.warn('testCases exceeded localStorage quota — clearing local cache (data is safe in the database):', e);
-      try { localStorage.removeItem('ai_agent_testcases'); } catch { }
-    }
-  }, [testCases]);
-  useEffect(() => {
-    try {
-      localStorage.setItem('ai_agent_history', JSON.stringify(history));
-    } catch (e) {
-      console.warn('history exceeded localStorage quota — clearing local cache (data is safe in the database):', e);
-      try { localStorage.removeItem('ai_agent_history'); } catch { }
-    }
-  }, [history]);
-  useEffect(() => {
-    try {
-      localStorage.setItem('ai_agent_knowledge_assets', JSON.stringify(knowledgeAssets));
-    } catch (e) {
-      console.warn('knowledgeAssets exceeded localStorage quota — clearing local cache (data is safe in the database):', e);
-      try { localStorage.removeItem('ai_agent_knowledge_assets'); } catch { }
-    }
-  }, [knowledgeAssets]);
+  // testCases, history, and knowledgeAssets are no longer written to
+  // localStorage — they're account-scoped data with no per-user namespace,
+  // and persisting them here is exactly what caused one user's counts to
+  // leak into another user's session on the same browser. The DB is the
+  // sole source of truth for these now; see fetchFromDB and the knowledge
+  // asset effect above.
   useEffect(() => { if (activeAppId) localStorage.setItem('ai_agent_active_appid', activeAppId); }, [activeAppId]);
 
   useEffect(() => {

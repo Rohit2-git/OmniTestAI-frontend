@@ -26,21 +26,53 @@ def _video_to_base64(video_path: str) -> str:
         return base64.b64encode(f.read()).decode("utf-8")
 
 
+def _repair_and_parse_json(raw: str) -> dict | None:
+    """
+    Gemini's self-heal responses are supposed to be clean JSON (response_mime_type
+    is forced to application/json), but long DOM/explanation content can still get
+    the output truncated mid-string — producing errors like "Unterminated string"
+    or "Expecting value". Previously any parse failure silently became a "skip",
+    which then got mislabeled as a successful [SELF-HEALED] step. This recovers
+    what it can instead of giving up immediately.
+    """
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt 1: the response was cut off mid-object — try closing it cleanly.
+    for suffix in ('"}', '"', '}', '"}}'):
+        try:
+            return json.loads(raw + suffix)
+        except json.JSONDecodeError:
+            continue
+
+    # Attempt 2: pull out whatever key:value pairs are still intact via regex,
+    # even if the object as a whole never closed properly.
+    result = {}
+    for key in ("action", "healed_type", "healed_selector", "role_name", "navigate_url", "explanation"):
+        m = re.search(rf'"{key}"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
+        if m:
+            result[key] = m.group(1).replace('\\"', '"')
+    return result if "action" in result else None
+
+
 async def _call_gemini_healer(
     step: str,
     failed_selectors: List[str],
     dom_snapshot: str,
     error_msg: str,
     app_id: str = None,
-    batch_label: str = None
+    batch_label: str = None,
+    screenshot_bytes: bytes = None,   # ← NEW: live page screenshot for visual triage
 ) -> dict:
     """
     Full-Page Situational Triage Engine: when a step fails (element not found,
-    selector broken, page state unexpected), Gemini scans the entire DOM, reasons
-    about *why* the failure happened, and decides the best next action — which may
-    be an alternative selector for the same action, a different action entirely,
-    a navigation step first, or a graceful skip if the step is genuinely irrelevant
-    to the current page state.
+    selector broken, page state unexpected), Gemini scans the entire DOM **and
+    a live screenshot**, reasons about *why* the failure happened, and decides the
+    best next action — which may be an alternative selector for the same action,
+    a different action entirely, a navigation step first, or a graceful skip if
+    the step is genuinely irrelevant to the current page state.
 
     Returns a dict with:
       {
@@ -55,6 +87,7 @@ async def _call_gemini_healer(
     from google import genai as _genai          # type: ignore
     from google.genai import types as _gtypes   # type: ignore
     from datetime import datetime as _dt
+    import base64 as _b64
 
     gemini_key = os.getenv("GEMINI_API_KEY")
     if not gemini_key:
@@ -63,10 +96,10 @@ async def _call_gemini_healer(
     try:
         _client = _genai.Client(api_key=gemini_key)
 
-        prompt = f"""You are an expert QA Self-Healing automation engine with full situational awareness.
+        text_prompt = f"""You are an expert QA Self-Healing automation engine with full situational awareness.
 
 A Playwright test step has failed. Your job is NOT just to find an alternative selector —
-you must analyze the full page state and decide the best possible next action.
+you must analyze the full page state (DOM + screenshot if provided) and decide the best possible next action.
 
 === FAILED STEP ===
 Original intent: "{step}"
@@ -77,13 +110,15 @@ Error: "{error_msg}"
 {(dom_snapshot or "")[:6000]}
 
 === YOUR TASK ===
-1. Read the DOM carefully. Understand what page/state the browser is actually on.
+1. Look at the screenshot (if provided) AND read the DOM. Understand what page/state the browser is actually on.
 2. Decide the best recovery action:
-   - "heal"       → PREFERRED: you found the correct element; provide the best selector you can find
-   - "navigate"   → the browser needs to go to a URL first before this step makes sense
-   - "press_enter" → pressing Enter is the right next move (e.g. after a search field)
-   - "skip"       → LAST RESORT ONLY: element genuinely does not exist anywhere on this page
-3. Always try to heal first. Only skip if the element truly cannot be found. Pick exactly one action.
+   - "heal"        → PREFERRED: you found the correct element; provide the best CSS selector from the DOM
+   - "navigate"    → the browser needs to go to a URL first before this step makes sense
+   - "press_enter" → pressing Enter is the right next move (e.g. after filling a search field)
+   - "skip"        → LAST RESORT ONLY: element genuinely does not exist anywhere on this page
+3. Always try to heal first. Only skip if the element truly cannot be found anywhere in the DOM.
+4. For "heal" on an input field: look for the exact input element in the DOM (by id, name, placeholder, type, or aria-label).
+   Prefer CSS selectors like input[name="username"] or input[type="password"] — these are the most reliable.
 
 Respond ONLY with valid JSON (no markdown, no explanation outside the JSON):
 {{
@@ -92,15 +127,25 @@ Respond ONLY with valid JSON (no markdown, no explanation outside the JSON):
     "healed_selector": "the selector or text to match",
     "role_name": "button | textbox | link | etc — only if healed_type is role",
     "navigate_url": "full URL — only if action is navigate",
-    "explanation": "one sentence: what went wrong and what you decided to do"
+    "explanation": "under 15 words: what went wrong and what you decided to do"
 }}"""
+
+        # Build contents list — always include text prompt, optionally add screenshot
+        contents = []
+        if screenshot_bytes:
+            try:
+                img_b64 = _b64.b64encode(screenshot_bytes).decode("utf-8")
+                contents.append(_gtypes.Part.from_bytes(data=_b64.b64decode(img_b64), mime_type="image/png"))
+            except Exception as _img_err:
+                print(f"[Healer screenshot encode error]: {_img_err}")
+        contents.append(text_prompt)
 
         response = await asyncio.to_thread(
             _client.models.generate_content,
             model="gemini-3-flash-preview",
-            contents=prompt,
+            contents=contents,
             config=_gtypes.GenerateContentConfig(
-                max_output_tokens=800,
+                max_output_tokens=1536,
                 response_mime_type="application/json"
             )
         )
@@ -162,11 +207,12 @@ Respond ONLY with valid JSON (no markdown, no explanation outside the JSON):
         if not raw:
             return {"action": "skip", "explanation": "Gemini response was empty after cleaning — skipping step"}
 
-        return json.loads(raw)
+        parsed = _repair_and_parse_json(raw)
+        if parsed is None:
+            print(f"[Self-Healing Telemetry Network Error]: unrecoverable JSON, raw response was: {raw[:300]}")
+            return {"action": "skip", "explanation": "Gemini response could not be parsed even after repair — skipping step"}
+        return parsed
 
-    except json.JSONDecodeError as je:
-        print(f"[Self-Healing Telemetry Network Error]: {je}")
-        return {"action": "skip", "explanation": f"Gemini response was not valid JSON: {je}"}
     except Exception as e:
         print(f"[Self-Healing Telemetry Network Error]: {e}")
         return {"action": "skip", "explanation": str(e)}
@@ -178,6 +224,17 @@ async def _execute_step(page, step: str, app_id: str = None, batch_label: str = 
     # read it as None. Guard here so nothing below crashes on .lower()/.strip().
     if not step or not isinstance(step, str):
         return {"status": "passed", "detail": "Empty/null step — skipped"}
+
+    # Steps generated by the NL autonomous agent may carry a disambiguation
+    # marker like "Click 'Add to cart' [context: Sauce Labs Backpack]" — used
+    # to tell apart several identical controls (e.g. repeated "Add to cart"
+    # buttons on a product listing). Strip it before any matching logic runs,
+    # but keep the value so the click handler can scope its search with it.
+    click_context = None
+    _ctx_match = re.search(r"\[context:\s*(.+?)\]\s*$", step, re.IGNORECASE)
+    if _ctx_match:
+        click_context = _ctx_match.group(1).strip()
+        step = step[:_ctx_match.start()].strip()
 
     s = step.lower().strip()
     healer_notes = None
@@ -202,9 +259,40 @@ async def _execute_step(page, step: str, app_id: str = None, batch_label: str = 
             text_match = re.search(r"['\"](.+?)['\"]", step)
             text = text_match.group(1) if text_match else ""
             if text:
-                # For search-intent steps, always prioritize search-specific locators first
-                is_search = any(w in s for w in ["search for", "search"])
-                if is_search:
+                # Detect field intent from the step text
+                is_search   = any(w in s for w in ["search for", "search"])
+                is_password = any(w in s for w in ["password", "pass"])
+                is_username = any(w in s for w in ["username", "user name", "user_name"])
+                is_email    = any(w in s for w in ["email", "e-mail"])
+
+                if is_password:
+                    # Password field — be very specific, never fall back to first textbox
+                    locators_to_try = [
+                        page.locator("input[type='password']").first,
+                        page.locator("input[name*='pass']").first,
+                        page.locator("input[id*='pass']").first,
+                        page.locator("input[placeholder*='assword']").first,
+                        page.get_by_label(re.compile(r"password", re.IGNORECASE)),
+                    ]
+                elif is_username:
+                    # Username field — prioritize name/id/placeholder over generic textbox
+                    locators_to_try = [
+                        page.locator("input[name='username']").first,
+                        page.locator("input[id*='user']").first,
+                        page.locator("input[placeholder*='sername']").first,
+                        page.locator("input[name*='user']").first,
+                        page.get_by_label(re.compile(r"username|user name", re.IGNORECASE)),
+                        page.locator("input[type='text']").first,
+                    ]
+                elif is_email:
+                    locators_to_try = [
+                        page.locator("input[type='email']").first,
+                        page.locator("input[name*='email']").first,
+                        page.locator("input[id*='email']").first,
+                        page.get_by_label(re.compile(r"email", re.IGNORECASE)),
+                        page.get_by_role("textbox"),
+                    ]
+                elif is_search:
                     locators_to_try = [
                         page.get_by_role("searchbox"),
                         page.locator("input[type='search']").first,
@@ -224,23 +312,60 @@ async def _execute_step(page, step: str, app_id: str = None, batch_label: str = 
                         page.locator("input:visible").first,
                         page.locator("textarea:visible").first,
                     ]
-                field_hints = re.findall(r'(?:in|into|on|the)\s+(?:the\s+)?([a-zA-Z\s]+?)(?:\s+field|\s+input|\s+box|$)', s)
-                if field_hints:
+
+                # Field hint extraction (from step phrasing like "in the X field").
+                # Uses .+? rather than a letters-only class — field labels routinely
+                # contain punctuation ("Zip/Postal Code", "E-mail", "User's Name"), and
+                # a restrictive character class silently fails to match those, which
+                # used to fall through to a blind "first textbox on the page" locator
+                # that can overwrite an already-filled field instead of the right one.
+                field_hints = re.findall(r'(?:in|into|on|the)\s+(?:the\s+)?(.+?)(?:\s+field|\s+input|\s+box|$)', s)
+                if field_hints and not is_password and not is_username and not is_email:
                     hint = field_hints[0].strip()
-                    locators_to_try = [
-                        page.get_by_placeholder(re.compile(hint, re.IGNORECASE)),
-                        page.get_by_label(re.compile(hint, re.IGNORECASE)),
-                        page.locator(f"[name*='{hint}']"),
-                        page.locator(f"[placeholder*='{hint}']"),
-                    ] + locators_to_try
+                    hint_locators = [
+                        page.get_by_placeholder(re.compile(re.escape(hint), re.IGNORECASE)),
+                        page.get_by_label(re.compile(re.escape(hint), re.IGNORECASE)),
+                    ]
+                    # These two use hint inside a quoted CSS attribute selector — skip them
+                    # if hint itself contains a quote (e.g. "user's name"), which would
+                    # otherwise break the selector string. The regex-based locators above
+                    # already cover this case fine.
+                    if "'" not in hint:
+                        hint_locators += [
+                            page.locator(f"[name*='{hint}']"),
+                            page.locator(f"[placeholder*='{hint}']"),
+                        ]
+                    locators_to_try = hint_locators + locators_to_try
                 
-                # Wrapped input loop selector sequence inside our safe execution layer
+                # Wrapped input loop selector sequence inside our safe execution layer.
+                # Extra safety net on top of the hint-matching above: if a candidate
+                # locator still resolves to MULTIPLE elements (e.g. a generic
+                # "any visible textbox" fallback), prefer the first one that's
+                # currently EMPTY over the literal first in DOM order — so an
+                # overly generic match can't silently overwrite a field an earlier
+                # step already filled in (this was the actual mechanism behind the
+                # postal-code-overwrote-first-name bug, on top of the hint-regex gap
+                # already fixed above).
                 success = False
                 for loc in locators_to_try:
                     try:
-                        await loc.first.wait_for(state="visible", timeout=1500)
-                        await loc.first.clear()
-                        await loc.first.type(text, delay=40)
+                        target = loc.first
+                        count = await loc.count()
+                        if count > 1:
+                            for idx in range(count):
+                                candidate = loc.nth(idx)
+                                try:
+                                    if not await candidate.is_visible():
+                                        continue
+                                    current_value = await candidate.input_value()
+                                    if not current_value:
+                                        target = candidate
+                                        break
+                                except Exception:
+                                    continue
+                        await target.wait_for(state="visible", timeout=1500)
+                        await target.clear()
+                        await target.type(text, delay=40)
                         success = True
                         break
                     except:
@@ -256,7 +381,17 @@ async def _execute_step(page, step: str, app_id: str = None, batch_label: str = 
                             dom_tree = await page.content()
                         except Exception:
                             dom_tree = ""
-                    healing_plan = await _call_gemini_healer(step, [str(l) for l in locators_to_try[:3]], dom_tree, "Locators timed out / vanished", app_id=app_id, batch_label=batch_label)
+                    # Capture screenshot so Gemini can visually see the page state
+                    try:
+                        _heal_screenshot = await page.screenshot(type="png")
+                    except Exception:
+                        _heal_screenshot = None
+                    healing_plan = await _call_gemini_healer(
+                        step, [str(l) for l in locators_to_try[:3]], dom_tree,
+                        "Locators timed out / vanished",
+                        app_id=app_id, batch_label=batch_label,
+                        screenshot_bytes=_heal_screenshot
+                    )
                     action = healing_plan.get("action", "heal")
 
                     if action == "skip":
@@ -317,14 +452,53 @@ async def _execute_step(page, step: str, app_id: str = None, batch_label: str = 
             text_match = re.search(r"['\"](.+?)['\"]", step)
             if text_match:
                 label = text_match.group(1)
+                label_re = re.escape(label)
+                label_lower = label.lower().strip()
                 locators_to_try = [
-                    page.get_by_role("button", name=re.compile(label, re.IGNORECASE)),
-                    page.get_by_role("link", name=re.compile(label, re.IGNORECASE)),
-                    page.get_by_text(re.compile(label, re.IGNORECASE)),
+                    page.get_by_role("button", name=re.compile(label_re, re.IGNORECASE)),
+                    page.get_by_role("link", name=re.compile(label_re, re.IGNORECASE)),
+                    page.get_by_text(re.compile(label_re, re.IGNORECASE)),
                     page.locator(f"button:has-text('{label}')"),
                     page.locator(f"[value='{label}']"),
                     page.locator(f"input[type='submit'][value*='{label}']"),
                 ]
+
+                # Labels like "cart icon" / "menu icon" are synthesized by the NL agent
+                # for icon-only controls that have no real visible text (see
+                # _get_clean_layout in nl_executor.py). Generic name-matching locators
+                # above will never match these — route straight to the same
+                # attribute-based strategies used for unquoted icon phrasing below.
+                icon_prefixes = {
+                    "cart icon": ("[data-testid*='cart'], [aria-label*='cart' i], [href*='cart'], .shopping_cart_link, #shopping_cart_container a", "cart|basket"),
+                    "menu icon": ("[data-testid*='menu'], [aria-label*='menu' i], .bm-burger-button, #react-burger-menu-btn", "menu|nav"),
+                    "search icon": ("[data-testid*='search'], [aria-label*='search' i]", "search"),
+                    "close icon": ("[data-testid*='close'], [aria-label*='close' i]", "close"),
+                    "wishlist icon": ("[data-testid*='wishlist'], [aria-label*='wishlist' i], [aria-label*='favorite' i]", "wishlist|favorite"),
+                }
+                if label_lower in icon_prefixes:
+                    css_sel, name_pattern = icon_prefixes[label_lower]
+                    locators_to_try = [
+                        page.locator(css_sel).first,
+                        page.get_by_role("link", name=re.compile(name_pattern, re.IGNORECASE)),
+                        page.get_by_role("button", name=re.compile(name_pattern, re.IGNORECASE)),
+                    ] + locators_to_try
+
+                if click_context:
+                    # Scope the search to whichever card/row/container also contains the
+                    # disambiguating text (e.g. the product name) — resolves the classic
+                    # "6 identical Add to cart buttons" ambiguity. Tried first, since it's
+                    # the most precise match when a context hint is available.
+                    ctx_re = re.escape(click_context)
+                    locators_to_try = [
+                        page.locator("div, li, article, section")
+                            .filter(has_text=re.compile(ctx_re, re.IGNORECASE))
+                            .get_by_role("button", name=re.compile(label_re, re.IGNORECASE))
+                            .first,
+                        page.locator("div, li, article, section")
+                            .filter(has_text=re.compile(ctx_re, re.IGNORECASE))
+                            .locator(f"button:has-text('{label}'), a:has-text('{label}'), [role='button']:has-text('{label}')")
+                            .first,
+                    ] + locators_to_try
             else:
                 surrounding = re.sub(r'\b(?:click|press|tap|select|choose|submit|the|a|an|on)\b', '', s).strip()
                 is_cart   = any(w in s for w in ["cart", "basket", "shopping"])
@@ -381,8 +555,18 @@ async def _execute_step(page, step: str, app_id: str = None, batch_label: str = 
                         dom_tree = await page.content()
                     except Exception:
                         dom_tree = ""
+                # Capture screenshot so Gemini can visually see the page state
+                try:
+                    _heal_screenshot_click = await page.screenshot(type="png")
+                except Exception:
+                    _heal_screenshot_click = None
                 failed_tags = [label] if text_match else [surrounding]
-                healing_plan = await _call_gemini_healer(step, failed_tags, dom_tree, "Target interaction node hidden or mutated", app_id=app_id, batch_label=batch_label)
+                healing_plan = await _call_gemini_healer(
+                    step, failed_tags, dom_tree,
+                    "Target interaction node hidden or mutated",
+                    app_id=app_id, batch_label=batch_label,
+                    screenshot_bytes=_heal_screenshot_click
+                )
                 action = healing_plan.get("action", "heal")
 
                 if action == "skip":

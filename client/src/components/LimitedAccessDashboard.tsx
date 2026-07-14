@@ -35,7 +35,7 @@ export const LimitedAccessDashboard: React.FC = () => {
   const [submitSuccess, setSubmitSuccess] = useState('');
   const [isLoading, setIsLoading] = useState(true);
 
-  const API_BASE = 'http://localhost:8000';
+  const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
   // Auth is cookie-based (httpOnly) — credentials: 'include' on each fetch
   // is what authenticates these requests, no Authorization header needed.
   const authHeaders = { 'Content-Type': 'application/json' };
@@ -55,7 +55,6 @@ export const LimitedAccessDashboard: React.FC = () => {
   useEffect(() => { fetchMyRequests(); }, []);
 
   const hasPending = requests.some(r => r.status === 'pending');
-  const latestRequest = requests[0];
 
   const handleSubmit = async () => {
     setSubmitError('');

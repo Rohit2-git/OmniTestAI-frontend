@@ -2,7 +2,7 @@ import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import {
   Ticket, ClipboardList, FileUp, Image, Sparkles, X,
-  ChevronDown, ChevronRight, FileText, Trash2, Edit2, Terminal, CheckSquare, Square, Copy, Download, ShieldCheck, HelpCircle, Activity, Cpu, Layers, Check
+  ChevronDown, ChevronRight, FileText, Trash2, Edit2, Terminal, CheckSquare, Square, Copy, Download, Activity, Cpu, Layers
 } from 'lucide-react';
 import { apiService } from '../services/api';
 
@@ -20,26 +20,9 @@ interface GeneratorLog {
   message: string;
 }
 
-interface GenerationBatch {
-  id: string;
-  sourceLabel: string;
-  batchName: string;
-  testCases: any[];
-  isCollapsed: boolean;
-  logs: GeneratorLog[];
-  metrics?: {
-    coverageIndex: number;
-    happyPaths: number;
-    edgeCases: number;
-    securityExceptions: number;
-    sourceFileName: string;
-    generationTime: number;
-  };
-}
-
 export const Generator: React.FC = () => {
   const {
-    applications, activeAppId, addTestCase, refreshTestCases, generationBatches, setGenerationBatches,
+    applications, activeAppId, refreshTestCases, generationBatches, setGenerationBatches,
     setIsGenerationRunning,
     generatorFormState, setGeneratorFormState
   } = useApp();
@@ -180,6 +163,14 @@ export const Generator: React.FC = () => {
     setShowModal(true);
   };
 
+  // Appends a single timestamped line to the generation console modal.
+  // Centralizes the pattern already used inline elsewhere in this file
+  // (see the catch block in triggerGeneration) so callers like
+  // handleStopGeneration don't need to repeat the timestamp formatting.
+  const pushModalLog = (type: GeneratorLog['type'], message: string) => {
+    setModalLogs(prev => [...prev, { timestamp: new Date().toTimeString().split(' ')[0], type, message }]);
+  };
+
   const handleStopGeneration = async () => {
     // This is the actual fix: abort the real in-flight fetch, not just flip local state.
     // Without this call, the backend keeps working and the result lands a minute later
@@ -309,7 +300,7 @@ export const Generator: React.FC = () => {
       };
 
       // Append success final lines safely
-      const completedLogs = [
+      const completedLogs: GeneratorLog[] = [
         ...initialLogs,
         { timestamp: new Date().toTimeString().split(' ')[0], type: 'success', message: 'Extraction completed successfully. Injecting compiled structures into layout handlers.' }
       ];
@@ -337,7 +328,14 @@ export const Generator: React.FC = () => {
         // further to do here. Specifically: don't log this as an engine exception,
         // and don't fall through to append a batch below.
       } else {
-        setModalLogs(prev => [...prev, { timestamp: new Date().toTimeString().split(' ')[0], type: 'warning', message: `Engine Exception Fired: ${e.message}` }]);
+        // Surface rate-limit errors (429) with the backend's message which includes
+        // time remaining — e.g. "Generation limit reached (5 per 10 min). Try again in 4m 30s."
+        const isRateLimit = e.message?.includes('limit reached') || e.message?.includes('limit reached') || e.message?.includes('Try again in');
+        const logType = isRateLimit ? 'warning' : 'warning';
+        const logMsg = isRateLimit
+          ? `⏱ Rate Limit: ${e.message}`
+          : `Engine Exception Fired: ${e.message}`;
+        setModalLogs(prev => [...prev, { timestamp: new Date().toTimeString().split(' ')[0], type: logType, message: logMsg }]);
       }
     } finally {
       setIsGenerating(false);
@@ -355,7 +353,7 @@ export const Generator: React.FC = () => {
     setSelectedCardIds(prev => prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]);
   };
 
-  const handleToggleSelectAllBatch = (batchId: string, batchTestCases: any[]) => {
+  const handleToggleSelectAllBatch = (batchTestCases: any[]) => {
     const allIds = batchTestCases.map(t => t.id);
     const areAllSelected = allIds.every(id => selectedCardIds.includes(id));
     setSelectedCardIds(prev => areAllSelected ? prev.filter(id => !allIds.includes(id)) : [...new Set([...prev, ...allIds])]);
@@ -367,7 +365,7 @@ export const Generator: React.FC = () => {
     if (confirm(`Purge all ${targets.length} selected test cases out of this staging batch?`)) {
       setGenerationBatches(prev => prev.map(batch => {
         if (batch.id !== batchId) return batch;
-        return { ...batch, testCases: batch.testCases.filter(tc => !selectedCardIds.includes(tc.id)) };
+        return { ...batch, testCases: batch.testCases.filter((tc: any) => !selectedCardIds.includes(tc.id)) };
       }).filter(batch => batch.testCases.length > 0));
       setSelectedCardIds(prev => prev.filter(id => !targets.some(t => t.id === id)));
     }
@@ -444,7 +442,7 @@ export const Generator: React.FC = () => {
   const saveInlineEdit = (batchId: string) => {
     setGenerationBatches(prev => prev.map(batch => {
       if (batch.id !== batchId) return batch;
-      return { ...batch, testCases: batch.testCases.map(tc => tc.id === editingCardId ? { ...tc, title: editTitle } : tc) };
+      return { ...batch, testCases: batch.testCases.map((tc: any) => tc.id === editingCardId ? { ...tc, title: editTitle } : tc) };
     }));
     setEditingCardId(null);
   };
@@ -634,9 +632,9 @@ export const Generator: React.FC = () => {
         {generationBatches.filter((batch) => {
           return batch.appId === activeAppId;
         }).map((batch) => {
-          const batchIds = batch.testCases.map(t => t.id);
+          const batchIds = batch.testCases.map((t: any) => t.id);
           const selectedInBatchCount = batch.testCases.filter((t: any) => selectedCardIds.includes(t.id)).length;
-          const isAllBatchChecked = batchIds.length > 0 && batchIds.every(id => selectedCardIds.includes(id));
+          const isAllBatchChecked = batchIds.length > 0 && batchIds.every((id: any) => selectedCardIds.includes(id));
           const isDropdownOpen = activeExportDropdownId === batch.id;
 
           return (
@@ -644,7 +642,7 @@ export const Generator: React.FC = () => {
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '1rem 1.25rem', background: '#f9fafb', borderBottom: '1px solid #e5e7eb', borderTopLeftRadius: '12px', borderTopRightRadius: '12px' }}>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                  <div style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', color: isAllBatchChecked ? '#008080' : '#d1d5db' }} onClick={() => handleToggleSelectAllBatch(batch.id, batch.testCases)}>
+                  <div style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', color: isAllBatchChecked ? '#008080' : '#d1d5db' }} onClick={() => handleToggleSelectAllBatch(batch.testCases)}>
                     {isAllBatchChecked ? <CheckSquare size={19} /> : <Square size={19} />}
                   </div>
 
@@ -710,7 +708,7 @@ export const Generator: React.FC = () => {
                                 <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#111827', margin: 0 }}>{test.title}</h3>
                                 <div style={{ display: 'flex', gap: '0.35rem' }}>
                                   <button type="button" className="btn btn-secondary btn-small" style={{ padding: '4px', border: '1px solid #e5e7eb', background: '#ffffff', borderRadius: '4px' }} onClick={() => openInlineEdit(test.id, test.title)}><Edit2 size={12} style={{ color: '#4b5563' }} /></button>
-                                  <button type="button" className="btn btn-secondary btn-small" style={{ padding: '4px', border: '1px solid #fee2e2', background: '#fff5f5', borderRadius: '4px' }} onClick={() => setGenerationBatches(prev => prev.map(b => b.id === batch.id ? { ...b, testCases: b.testCases.filter(t => t.id !== test.id) } : b).filter(b => b.testCases.length > 0))}><Trash2 size={12} style={{ color: '#ef4444' }} /></button>
+                                  <button type="button" className="btn btn-secondary btn-small" style={{ padding: '4px', border: '1px solid #fee2e2', background: '#fff5f5', borderRadius: '4px' }} onClick={() => setGenerationBatches(prev => prev.map(b => b.id === batch.id ? { ...b, testCases: b.testCases.filter((t: any) => t.id !== test.id) } : b).filter(b => b.testCases.length > 0))}><Trash2 size={12} style={{ color: '#ef4444' }} /></button>
                                 </div>
                               </>
                             )}

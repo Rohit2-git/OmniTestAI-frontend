@@ -1,0 +1,160 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider  = "prisma-client-py"
+  interface = "asyncio"
+}
+
+model TestRun {
+  id            Int            @id @default(autoincrement())
+  filename      String
+  batchName     String?
+  total         Int
+  status        String         @default("completed")
+  appId         String?
+  createdAt     DateTime       @default(now())
+  createdByUserId Int?
+  createdByRole   String?
+  visibility      String        @default("all")
+
+  results       TestResult[]
+  executionRuns ExecutionRun[]
+}
+
+model TestResult {
+  id             Int      @id @default(autoincrement())
+  runId          Int
+  run            TestRun  @relation(fields: [runId], references: [id])
+  title          String
+  steps          String
+  expectedResult String
+  type           String
+  createdAt      DateTime @default(now())
+
+  testDataSourceType String?
+  testDataSourceId   String?
+  testDataValues     String?
+}
+
+model TestDataTemplate {
+  id        String   @id @default(cuid())
+  appId     String
+  name      String
+  scenario  String
+  fields    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model TestDataCondition {
+  id             String   @id @default(cuid())
+  appId          String
+  description    String
+  resolvedFields String
+  isDefault      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+}
+
+model SyntheticBatch {
+  id                 String   @id @default(cuid())
+  appId              String
+  sourceTemplateId   String
+  sourceTemplateName String
+  name               String
+  recordCount        Int
+  records            String
+  createdAt          DateTime @default(now())
+}
+
+model ExecutionRun {
+  id               Int               @id @default(autoincrement())
+  runId            Int
+  run              TestRun           @relation(fields: [runId], references: [id])
+  baseUrl          String
+  total            Int
+  executed         Int
+  passed           Int
+  failed           Int
+  notRun           Int
+  stoppedEarly     Boolean           @default(false)
+  createdAt        DateTime          @default(now())
+  executionResults ExecutionResult[]
+}
+
+model ExecutionResult {
+  id             Int          @id @default(autoincrement())
+  executionRunId Int
+  executionRun   ExecutionRun @relation(fields: [executionRunId], references: [id])
+  title          String
+  passed         Boolean
+  type           String
+  expectedResult String
+  agentOutput    String
+  stepResults    String
+  screenshotPaths String?
+  videoPath       String?
+  createdAt      DateTime     @default(now())
+}
+
+model KnowledgeAsset {
+  id        Int      @id @default(autoincrement())
+  appId     String
+  name      String
+  type      String
+  summary   String
+  tags      String
+  url       String?
+  createdAt DateTime @default(now())
+}
+
+model User {
+  id             Int              @id @default(autoincrement())
+  email          String           @unique
+  passwordHash   String
+  name           String
+  role           String           @default("qa_reviewer")
+  isActive       Boolean          @default(true)
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  roleRequests   RoleRequest[]
+  appAccess      UserAppAccess[]
+}
+
+model Application {
+  id          String         @id
+  name        String
+  description String         @default("")
+  platform    String         @default("web")
+  url         String         @default("http://localhost")
+  status      String         @default("active")
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  appAccess   UserAppAccess[]
+}
+
+model UserAppAccess {
+  id        Int         @id @default(autoincrement())
+  userId    Int
+  user      User        @relation(fields: [userId], references: [id])
+  appId     String
+  app       Application @relation(fields: [appId], references: [id])
+  createdAt DateTime    @default(now())
+
+  @@unique([userId, appId])
+}
+
+model RoleRequest {
+  id            Int      @id @default(autoincrement())
+  userId        Int
+  user          User     @relation(fields: [userId], references: [id])
+  requestedRole String
+  reason        String
+  status        String   @default("pending")
+  reviewedBy    Int?
+  reviewNote    String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}

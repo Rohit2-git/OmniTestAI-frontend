@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
 import { useAuth } from '../context/AuthContext';
-import { apiService } from '../services/api';
 import { 
   Folder, 
   FileCheck, 
@@ -43,7 +42,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
   const [accessSuccess, setAccessSuccess] = useState('');
   const [myRequest, setMyRequest] = useState<any>(null);
 
-  const API_BASE = 'http://localhost:8000';
+  const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
   const authHeaders = { 'Content-Type': 'application/json' };
 
   // Only qa_reviewer and developer can request upgrades
@@ -94,7 +93,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
   // ⚡ DYNAMIC CLIENT DERIVATIONS - ALWAYS 100% IN SYNC WITH CURRENT APP WORKSPACE
   const totalApps = applications.length;
   const totalTestCases = testCases.length;
-  const aiGeneratedTests = testCases.filter(tc => tc.source === 'ai').length;
+  const aiGeneratedTests = testCases.filter(tc => tc.source === 'ai-jira' || tc.source === 'ai-acceptance').length;
   const manualAuthoredTests = testCases.filter(tc => tc.source === 'manual' || !tc.source).length;
   const totalKnowledgeAssets = knowledgeAssets?.length || 0;
 
@@ -109,7 +108,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
     return Math.round((passedRuns / completedRuns.length) * 100);
   }, [history]);
 
-  const [loading, setLoading] = useState(false);
+  const [loading] = useState(false);
   const [isManageModalOpen, setIsManageModalOpen] = useState(false);
   const [editingAppId, setEditingAppId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
@@ -417,7 +416,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ setActiveTab }) => {
                       {app.description || "Active cross-platform verification framework layout profile target assignment."}
                     </p>
                     
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', pt: '0.75rem', borderTop: '1px solid #f1f5f9', fontSize: '0.78rem', color: '#64748b', fontWeight: 500 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '0.75rem', borderTop: '1px solid #f1f5f9', fontSize: '0.78rem', color: '#64748b', fontWeight: 500 }}>
                       <span>{getAppTestCount(app.id)} Active Blueprints</span>
                       <span>Pass Index: <strong style={{ color: '#0f172a', fontWeight: 700 }}>{getAppPassRate(app.id)}</strong></span>
                     </div>

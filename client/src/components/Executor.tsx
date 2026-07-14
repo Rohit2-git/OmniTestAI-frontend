@@ -3,10 +3,14 @@ import { useApp } from '../context/AppContext';
 import { useAuth } from '../context/AuthContext';
 import { 
   Play, Command, ListTodo, Trash2, CheckCircle2, 
-  XCircle, Image as ImageIcon, Terminal as TerminalIcon, Maximize2, Loader2, Layers, Sparkles
+  XCircle, Image as ImageIcon, Terminal as TerminalIcon, Loader2, Layers, Sparkles
 } from 'lucide-react';
 
-const API_BASE = 'http://localhost:8000';
+// In dev (npm run dev), falls back to localhost:8000 so local testing still
+// works without Docker. In production, VITE_API_BASE_URL is injected at build
+// time (see client/Dockerfile) as the relative path "/api", which nginx
+// then proxies to the backend container - see nginx/nginx.conf.
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
 interface ExecutorProps {
   selectedTestIdsForRun: string[];
@@ -20,8 +24,6 @@ const SlideshowPanel: React.FC<{ screenshots: any[]; isHeadfulOnly?: boolean; vi
   const [slideIdx, setSlideIdx] = useState(0);
   const total = screenshots.length;
 
-  // Prefer the saved file URL (works after reload) over base64 (only present
-  // during a live, in-progress run before the result has been persisted).
   const slideSrc = (s: any) => s?.image_path ? `${API_BASE}${s.image_path}` : `data:image/png;base64,${s?.image_base64}`;
   const videoSrc = videoPath ? `${API_BASE}${videoPath}` : (videoBase64 ? `data:video/webm;base64,${videoBase64}` : null);
 
@@ -97,22 +99,63 @@ const SlideshowPanel: React.FC<{ screenshots: any[]; isHeadfulOnly?: boolean; vi
 
 const TestCard: React.FC<{
   tc: any; result: any; isExpanded: boolean; isRunning: boolean; isProcessing: boolean;
-  onExpand: () => void; onRun: (tc: any) => void; onRemove: (e: React.MouseEvent, id: string) => void;
+  onExpand: () => void; onRun: ((tc: any) => void) | null; onRemove: (e: React.MouseEvent, id: string) => void;
   renderStepTrace: (steps: any[]) => React.ReactNode;
-}> = ({ tc, result, isExpanded, isRunning, isProcessing, onExpand, onRun, onRemove, renderStepTrace }) => {
+  onViewFullText?: (text: string) => void;
+}> = ({ tc, result, isExpanded, isRunning, isProcessing, onExpand, onRun, onRemove, renderStepTrace, onViewFullText }) => {
   const isHeadfulOnly = result?.mode === 'headful_single' || (!result?.screenshots?.length && result?.mode !== 'headless_suite');
+  const [titleExpanded, setTitleExpanded] = React.useState(false);
+
+  const isTruncated = onViewFullText && (tc.title.endsWith('..."') || tc.fullCommand?.length > 35);
+  const fullText = tc.fullCommand || tc.steps?.join('\n') || tc.title;
+
+  // Determine passed status — for NL runs, also check step-level outcomes
+  // in case the backend set passed=false but most steps actually succeeded.
+  const isPassed = (() => {
+    if (!result) return null;
+    if (result.passed) return true;
+    // Backend already fixed this in nl_executor.py, but guard here too:
+    // if overall_status says PASSED, trust it over result.passed
+    if (result.overall_status === 'PASSED') return true;
+    return false;
+  })();
+
   return (
-    <div style={{ border: '1px solid #e2e8f0', borderRadius: '12px', background: isExpanded ? '#f8fafc' : '#fff', overflow: 'hidden' }}>
-      <div style={{ padding: '1rem 1.25rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem', flex: 1, cursor: 'pointer' }} onClick={onExpand}>
+    <div style={{ border: '1px solid #e2e8f0', borderRadius: '12px', background: isExpanded ? '#f8fafc' : '#fff' }}>
+      <div style={{ padding: '1rem 1.25rem', display: 'flex', justifyContent: 'space-between', alignItems: titleExpanded ? 'flex-start' : 'center' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem', flex: 1, cursor: 'pointer', minWidth: 0 }} onClick={onExpand}>
           {isRunning ? <Loader2 className="animate-spin" size={22} color="#6366f1" /> :
-            result ? (result.passed ? <CheckCircle2 color="#10b981" size={22} /> : <XCircle color="#ef4444" size={22} />) :
-            <div style={{ width: '22px', height: '22px', borderRadius: '50%', border: '2px solid #e2e8f0' }} />}
-          <div>
-            <div style={{ fontWeight: 700, color: '#1e293b', fontSize: '1rem' }}>{tc.title}</div>
+            result ? (isPassed ? <CheckCircle2 color="#10b981" size={22} /> : <XCircle color="#ef4444" size={22} />) :
+            <div style={{ width: '22px', height: '22px', borderRadius: '50%', border: '2px solid #e2e8f0', flexShrink: 0 }} />}
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontWeight: 700, color: '#1e293b', fontSize: '1rem' }}>
+              {isTruncated ? (
+                titleExpanded ? (
+                  <span style={{ display: 'block', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                    {`NL Action Run — "${fullText}"`}
+                  </span>
+                ) : (
+                  <span style={{ display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {tc.title}
+                  </span>
+                )
+              ) : (
+                <span style={{ display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {tc.title}
+                </span>
+              )}
+              {isTruncated && (
+                <span
+                  onClick={(e) => { e.stopPropagation(); setTitleExpanded(v => !v); }}
+                  style={{ display: 'inline-block', marginTop: '2px', fontSize: '0.72rem', color: '#0891b2', fontWeight: 600, cursor: 'pointer' }}
+                >
+                  {titleExpanded ? 'show less' : '...more'}
+                </span>
+              )}
+            </div>
             <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 500 }}>
               {tc.steps ? `${tc.steps.length} Actions` : 'Autonomous Actions'} •{' '}
-              {result ? (result.passed ? '✓ Passed' : '✗ Failed') : 'Pending'} •{' '}
+              {result ? (isPassed ? '✓ Passed' : '✗ Failed') : 'Pending'} •{' '}
               <span style={{
                 background: tc.priority === 'high' ? '#fee2e2' : tc.priority === 'medium' ? '#fef3c7' : '#dcfce7',
                 color: tc.priority === 'high' ? '#dc2626' : tc.priority === 'medium' ? '#d97706' : '#16a34a',
@@ -121,11 +164,11 @@ const TestCard: React.FC<{
             </div>
           </div>
         </div>
-        <div style={{ display: 'flex', gap: '0.75rem' }}>
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
           {onRun && (
             <button onClick={(e) => { e.stopPropagation(); onRun(tc); }} disabled={isProcessing}
-              style={{ padding: '8px', borderRadius: '8px', border: '1px solid #e2e8f0', background: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
-              <Play size={16} style={{ color: '#0f172a' }} />
+              style={{ padding: '8px', borderRadius: '8px', border: '1px solid #e2e8f0', background: '#ffffff', cursor: isProcessing ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', opacity: isProcessing ? 0.5 : 1 }}>
+              {isRunning ? <Loader2 className="animate-spin" size={16} color="#6366f1" /> : <Play size={16} style={{ color: '#0f172a' }} />}
             </button>
           )}
           {onRemove && (
@@ -137,7 +180,7 @@ const TestCard: React.FC<{
         </div>
       </div>
       {isExpanded && result && (
-        <div style={{ padding: '1.25rem', borderTop: '1px solid #e2e8f0', background: '#ffffff' }}>
+        <div style={{ padding: '1.25rem', borderTop: '1px solid #e2e8f0', background: '#ffffff', overflow: 'hidden', borderRadius: '0 0 12px 12px' }}>
           {renderStepTrace(result.step_results || [])}
           <SlideshowPanel screenshots={result.screenshots || []} isHeadfulOnly={isHeadfulOnly} videoBase64={result.video_base64} videoPath={result.video_path} />
         </div>
@@ -158,14 +201,12 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
   const isReadOnly = user?.role === 'qa_reviewer';
 
   const [nlCommand, setNlCommand] = useState('');
-  
   const [nlHistoricalRuns, setNlHistoricalRuns] = useState<any[]>([]);
 
   const processingId = activeExecutionId;
   const setProcessingId = setActiveExecutionId;
   const isProcessing = isSuiteRunning || isNLRunning || activeExecutionId !== null;
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const sectionsKey = `omnitest_expanded_sections_${activeAppId || 'default'}`;
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>(() => {
     try {
       const saved = localStorage.getItem(`omnitest_expanded_sections_${activeAppId || 'default'}`);
@@ -191,12 +232,10 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
   const [showRunDropdown, setShowRunDropdown] = useState(false);
   const [showClearDropdown, setShowClearDropdown] = useState(false);
   const executionAbortRef = React.useRef<AbortController | null>(null);
+  const nlAbortRef = React.useRef<AbortController | null>(null);
 
   const stagedKey = `omnitest_staged_ids_${activeAppId || 'default'}`;
-  // Renamed from idbScreenshots: this now comes from the real database via
-  // /results/, not browser-local IndexedDB, so results survive reload
-  // across any browser/device, not just the one that ran the test.
-  const [dbExecutionResults, setDbExecutionResults] = useState<Record<string, { screenshots: any[]; videoBase64?: string; videoPath?: string }>>({});
+  const [dbExecutionResults, setDbExecutionResults] = useState<Record<string, { screenshots: any[]; videoBase64?: string; videoPath?: string; passed?: boolean; step_results?: any[] }>>({});
 
   useEffect(() => {
     if (!activeAppId) return;
@@ -217,11 +256,6 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
             const execData = await execRes.json();
             for (const tcResult of execData.test_case_results || []) {
               const stepResults: any[] = tcResult.step_results || [];
-
-              // Screenshots come from step_results directly — each step has
-              // image_path and image_base64 embedded, so there's no parallel
-              // array alignment assumption. Only steps that actually have a
-              // screenshot appear in the slideshow.
               const screenshots = stepResults
                 .filter((s: any) => s.image_path || s.image_base64)
                 .map((s: any) => ({
@@ -232,7 +266,25 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
                   image_base64: s.image_base64 || null,
                 }));
 
-              merged[tcResult.title] = {
+              // NL runs are keyed elsewhere (nlHistoricalRuns, and the
+              // live-run state set right after /execute/nl completes) using
+              // a frontend-generated title: `NL Action Run — "..."` (35-char
+              // truncation). The backend instead stores the row under
+              // `Autonomous Run Goal — '...'` (50-char truncation, single
+              // quotes). These never matched, so on reload this dictionary
+              // was populated under a key nothing ever looked up — that's
+              // why screenshots/video appeared to disappear after refresh
+              // even though the files and DB row were both intact. Derive
+              // the same frontend-format title here so both paths agree.
+              const isNlRun = run.filename?.startsWith('NL:');
+              const key = isNlRun
+                ? (() => {
+                    const fullCommand = run.filename.replace(/^NL:\s*/, '');
+                    return `NL Action Run — "${fullCommand.substring(0, 35)}${fullCommand.length > 35 ? '...' : ''}"`;
+                  })()
+                : tcResult.title;
+
+              merged[key] = {
                 passed: tcResult.passed,
                 step_results: stepResults,
                 screenshots,
@@ -244,17 +296,19 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
 
         setDbExecutionResults(merged);
 
-        // Load NL runs from DB — NL executions are saved as TestRuns with
-        // filename starting "NL:", so we filter them here for the sidebar.
         const nlRuns = runs
           .filter((r: any) => r.filename?.startsWith('NL:'))
-          .map((r: any) => ({
-            id: `nl-run-${r.run_id}`,
-            title: `NL Action Run — "${r.filename.replace(/^NL:\s*/, '').substring(0, 35)}${r.filename.replace(/^NL:\s*/, '').length > 35 ? '...' : ''}"`,
-            priority: 'high',
-            steps: [],
-            runId: r.run_id,
-          }));
+          .map((r: any) => {
+            const fullCommand = r.filename.replace(/^NL:\s*/, '');
+            return {
+              id: `nl-run-${r.run_id}`,
+              title: `NL Action Run — "${fullCommand.substring(0, 35)}${fullCommand.length > 35 ? '...' : ''}"`,
+              priority: 'high',
+              steps: fullCommand.split(/[\n;]+/).map((s: string) => s.trim()).filter(Boolean),
+              runId: r.run_id,
+              fullCommand,
+            };
+          });
         setNlHistoricalRuns(nlRuns);
       } catch (e) {
         console.error('Failed to load execution history from DB:', e);
@@ -267,7 +321,6 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
   const [completedExecutions, setCompletedExecutions] = useState<any[]>([]);
   const [completedLoading, setCompletedLoading] = useState(false);
 
-  // QA Reviewer: fetch deduplicated completed executions from the new endpoint
   useEffect(() => {
     if (!isReadOnly || !activeAppId) return;
     const fetchCompleted = async () => {
@@ -316,8 +369,6 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
         }];
       }
       if (liveResult) return [title, liveResult];
-      // DB-only: reconstruct from what the database has — passed comes
-      // directly from the stored ExecutionResult.passed boolean, not inferred.
       return [title, {
         passed: stored!.passed ?? false,
         step_results: stored!.step_results || [],
@@ -328,7 +379,7 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
     })
   );
   
-  const setTestResults = (updater: any) => {
+  const setTestResults = (updater: Record<string, any> | ((current: Record<string, any>) => Record<string, any>)) => {
     setExecutionResults(prev => {
       const appKey = activeAppId || '';
       const current = prev[appKey] || {};
@@ -406,7 +457,6 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
   };
 
   const handleClearAll = async () => {
-    // Clear all local state first so the UI is instant
     setTestResults({});
     setExpandedId(null);
     setStagedIds([]);
@@ -421,10 +471,6 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
     clearSelectedTests();
 
     if (activeAppId) {
-      // Single endpoint that wipes ALL TestRuns + ExecutionRuns + ExecutionResults
-      // + disk files for this app — including orphaned execution records that the
-      // old fetch-then-delete loop missed (which caused stale data to appear for
-      // QA Reviewers even after Clear All was clicked).
       try {
         await fetch(`${API_BASE}/results/app/${activeAppId}/all`, {
           method: 'DELETE',
@@ -446,7 +492,6 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
     setNlHistoricalRuns(prev => {
       const target = prev.find(r => r.id === localRunId);
       const updated = prev.filter(r => r.id !== localRunId);
-      // Delete the DB row — that's the source of truth now.
       if (target?.runId != null) {
         fetch(`${API_BASE}/results/${target.runId}`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
       }
@@ -458,12 +503,69 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
     setShowClearDropdown(false);
     const runsToDelete = nlHistoricalRuns.filter(r => r.runId != null).map(r => r.runId);
     setNlHistoricalRuns([]);
-    // Delete all NL run DB rows — source of truth.
     await Promise.all(
       runsToDelete.map((runId: number) =>
         fetch(`${API_BASE}/results/${runId}`, { method: 'DELETE', credentials: 'include' }).catch(() => {})
       )
     );
+  };
+
+  const handleRerunNL = async (runItem: any) => {
+    if (!activeApp?.url) {
+      alert('No active application URL set — cannot rerun.');
+      return;
+    }
+    if (isProcessing) {
+      alert('Another execution is already running. Wait for it to finish before rerunning.');
+      return;
+    }
+    const originalCommand = runItem.fullCommand
+      || (runItem.steps?.length > 0 ? runItem.steps.join('\n') : '')
+      || runItem.title.replace(/^NL Action Run — "/, '').replace(/"$/, '').replace(/\.\.\.$/, '');
+    const abortController = new AbortController();
+    nlAbortRef.current = abortController;
+    setIsNLRunning(true);
+    const startTime = Date.now();
+    try {
+      const steps = originalCommand.split(/[\n;]+/).map((s: string) => s.trim()).filter(Boolean);
+      const res = await fetch(`${API_BASE}/execute/nl`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ url: activeApp.url, steps, appId: String(activeAppId) }),
+        signal: abortController.signal
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => null);
+        throw new Error(errBody?.detail || `Rerun failed (HTTP ${res.status})`);
+      }
+      const data = await res.json();
+      if (data?.aborted) return;
+      const uniqueId = `nl-run-${Date.now()}`;
+      const virtualTestCase = {
+        id: uniqueId,
+        title: `NL Action Run — "${originalCommand.length > 35 ? originalCommand.substring(0, 35) + '...' : originalCommand}"`,
+        priority: 'high',
+        steps,
+        runId: data.run_id,
+        fullCommand: originalCommand,
+      };
+      setTestResults(prev => ({ ...prev, [virtualTestCase.title]: data }));
+      setNlHistoricalRuns(prev => [virtualTestCase, ...prev]);
+      setExpandedId(uniqueId);
+      if (activeAppId) {
+        setDbExecutionResults(prev => ({ ...prev, [virtualTestCase.title]: { screenshots: data.screenshots || [], videoBase64: data.video_base64, videoPath: data.video_path } }));
+      }
+      saveToHistory(data, 'natural_language', [], originalCommand, startTime);
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') {
+        console.error('NL re-run error:', err);
+        alert(`Rerun failed: ${err?.message || 'Unknown error'}`);
+      }
+    } finally {
+      nlAbortRef.current = null;
+      setIsNLRunning(false);
+    }
   };
 
   const handleSingleExecution = async (tc: any) => {
@@ -479,6 +581,7 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
       const res = await fetch(`${API_BASE}/execute/single`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ url: activeApp.url, steps, title: tc.title, expected_result: tc.steps[tc.steps.length - 1]?.expected || '', appId: activeAppId }),
         signal: abortController.signal
       });
@@ -513,12 +616,11 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
       const res = await fetch(`${API_BASE}/execute/suite`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ base_url: activeApp.url, test_cases: testCasesPayload, appId: activeAppId }),
         signal: abortController.signal
       });
       const data = await res.json();
-      // If the backend reports the run was aborted and cleaned up, don't
-      // store any partial results — the DB rows and files are already gone.
       if (!data?.aborted) {
         const resultMap: Record<string, any> = {};
         if (data?.results) {
@@ -561,6 +663,7 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
       const res = await fetch(`${API_BASE}/execute/suite`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ base_url: activeApp.url, test_cases: testCasesPayload, appId: activeAppId }),
         signal: abortController.signal
       });
@@ -605,8 +708,6 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
         sectionTitles.forEach(title => delete next[title]);
         return next;
       });
-      // Surgically delete only these titles' DB rows — never the whole
-      // batch/run, which could otherwise remove unrelated tests' results.
       if (sectionTitles.length > 0) {
         fetch(`${API_BASE}/results/execution/delete-by-title`, {
           method: 'POST',
@@ -619,20 +720,23 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
   };
 
   const handleStopSuiteExecution = async () => {
-    // 1. Abort the in-flight fetch immediately — this unblocks the frontend right away.
     if (executionAbortRef.current) {
       executionAbortRef.current.abort();
       executionAbortRef.current = null;
     }
+    if (nlAbortRef.current) {
+      nlAbortRef.current.abort();
+      nlAbortRef.current = null;
+    }
     setIsSuiteRunning(false);
+    setIsNLRunning(false);
     setProcessingId(null);
-    // 2. Also tell the backend to stop — so the Playwright process halts between steps
-    //    and doesn't keep running headlessly in the background after the fetch was aborted.
     if (!activeApp?.url) return;
     try {
       await fetch(`${API_BASE}/execute/stop`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ base_url: activeApp.url })
       });
     } catch (err) {
@@ -642,6 +746,8 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
 
   const handleNLExecution = async () => {
     if (!nlCommand.trim() || !activeApp?.url) return;
+    const abortController = new AbortController();
+    nlAbortRef.current = abortController;
     setIsNLRunning(true);
     const startTime = Date.now();
     const currentCommand = nlCommand;
@@ -650,33 +756,43 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
       const res = await fetch(`${API_BASE}/execute/nl`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: activeApp.url, steps, appId: String(activeAppId) })
+        credentials: 'include',
+        body: JSON.stringify({ url: activeApp.url, steps, appId: String(activeAppId) }),
+        signal: abortController.signal
       });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => null);
+        throw new Error(errBody?.detail || `NL execution failed (HTTP ${res.status})`);
+      }
       const data = await res.json();
-      
+
+      if (data?.aborted) return;
+
       const uniqueId = `nl-run-${Date.now()}`;
       const virtualTestCase = {
         id: uniqueId,
         title: `NL Action Run — "${currentCommand.length > 35 ? currentCommand.substring(0, 35) + '...' : currentCommand}"`,
         priority: 'high',
         steps: steps,
-        runId: data.run_id
+        runId: data.run_id,
+        fullCommand: currentCommand,
       };
 
       setTestResults(prev => ({ ...prev, [virtualTestCase.title]: data }));
-      
       setNlHistoricalRuns(prev => [virtualTestCase, ...prev]);
-
       setExpandedId(uniqueId);
-      
       if (activeAppId) {
         setDbExecutionResults(prev => ({ ...prev, [virtualTestCase.title]: { screenshots: data.screenshots || [], videoBase64: data.video_base64, videoPath: data.video_path } }));
       }
       saveToHistory(data, 'natural_language', [], currentCommand, startTime);
       setNlCommand('');
-    } catch (err) {
-      console.error('NL execution error:', err);
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') {
+        console.error('NL execution error:', err);
+        alert(`NL execution failed: ${err?.message || 'Unknown error'}`);
+      }
     } finally {
+      nlAbortRef.current = null;
       setIsNLRunning(false);
     }
   };
@@ -694,7 +810,6 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
 
           return (
             <div key={i} style={{ color: '#cbd5e1', fontSize: '0.8rem', fontFamily: 'monospace', marginBottom: '6px', lineHeight: '1.4' }}>
-              {/* Step status dot — amber for self-healed (recovered), green for clean pass, red for fail */}
               <span style={{
                 color: isSelfHealed ? '#f59e0b' : st.status === 'passed' ? '#10b981' : '#ef4444',
                 marginRight: '8px'
@@ -702,36 +817,24 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
               <span style={{ color: '#475569', marginRight: '8px' }}>[{st.step_number ?? i + 1}]</span>
               {st.step}
 
-              {/* Self-healing indicator — shown whenever Gemini had to intervene to recover this step */}
               {isSelfHealed && (
                 <span style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '4px',
-                  marginLeft: '8px',
-                  padding: '1px 7px',
-                  borderRadius: '5px',
-                  background: 'rgba(245,158,11,0.15)',
-                  border: '1px solid rgba(245,158,11,0.35)',
-                  color: '#f59e0b',
-                  fontSize: '0.68rem',
-                  fontWeight: 700,
-                  letterSpacing: '0.04em',
-                  fontFamily: 'Inter, system-ui, sans-serif',
-                  verticalAlign: 'middle',
+                  display: 'inline-flex', alignItems: 'center', gap: '4px', marginLeft: '8px',
+                  padding: '1px 7px', borderRadius: '5px',
+                  background: 'rgba(245,158,11,0.15)', border: '1px solid rgba(245,158,11,0.35)',
+                  color: '#f59e0b', fontSize: '0.68rem', fontWeight: 700, letterSpacing: '0.04em',
+                  fontFamily: 'Inter, system-ui, sans-serif', verticalAlign: 'middle',
                 }}>
                   ⚡ SELF-HEALED
                 </span>
               )}
 
-              {/* Healer explanation — shown as italic amber text below the step */}
               {isSelfHealed && healExplanation && (
                 <div style={{ color: '#fbbf24', fontStyle: 'italic', fontSize: '0.72rem', marginTop: '2px', marginLeft: '24px', opacity: 0.85 }}>
                   ↳ {healExplanation}
                 </div>
               )}
 
-              {/* Normal failure detail — only shown for real failures, not healed ones */}
               {st.status === 'failed' && !isSelfHealed && (
                 <span style={{ color: '#fca5a5', fontStyle: 'italic' }}> ({detail})</span>
               )}
@@ -755,7 +858,7 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
           <Command size={18} color="#0891b2" />
           <span style={{ fontSize: '0.8rem', fontWeight: 800, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.05em' }}>NL Execution Controller</span>
         </div>
-        <p style={{ fontSize: '0.78rem', color: '#94a3b8', marginBottom: '1rem' }}>Enter plain-English test instructions, one per line or separated by semicolons. Executes in an interactive browser session with screenshot capture.</p>
+        <p style={{ fontSize: '0.78rem', color: '#94a3b8', marginBottom: '1rem' }}>Describe what you want to test in plain English — no step-by-step scripting needed. Just tell it the goal and it will figure out how to do it.</p>
         {isReadOnly ? (
           <div style={{ padding: '0.75rem 1rem', background: 'rgba(148,163,184,0.08)', border: '1px solid var(--border-light)', borderRadius: '10px', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
             View-only access — NL execution is restricted to QA Engineers and above.
@@ -763,7 +866,7 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
         ) : (
           <div style={{ display: 'flex', gap: '1rem' }}>
             <textarea className="input-field" value={nlCommand} onChange={(e) => setNlCommand(e.target.value)}
-              placeholder={"Navigate to the login page\nEnter valid email and password\nClick the login button"}
+              placeholder={"e.g. Go to the homepage, log in with my credentials, search for a product and add it to the cart"}
               rows={3} style={{ flex: 1, padding: '0.75rem 1.25rem', borderRadius: '12px', border: '1px solid #cbd5e1', outline: 'none', fontSize: '0.9rem', resize: 'vertical', fontFamily: 'Inter, system-ui, sans-serif', color: '#1e293b', background: '#f8fafc', fontWeight: 400 }} />
             <button onClick={handleNLExecution} disabled={isProcessing || !nlCommand.trim()}
               style={{ borderRadius: '8px', padding: '8px 20px', background: '#06b6d4', color: '#fff', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.6rem', border: 'none', cursor: 'pointer', alignSelf: 'center', fontSize: '0.85rem' }}>
@@ -789,17 +892,14 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
             {/* CLEAR ALL — split button */}
             <div data-dropdown style={{ position: 'relative' }}>
               <div style={{ display: 'flex', borderRadius: '8px', overflow: 'visible', border: '1px solid #e2e8f0' }}>
-                <button
-                  onClick={handleClearAll}
-                  style={{ background: '#f1f5f9', color: '#475569', border: 'none', padding: '8px 14px', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer', borderRight: '1px solid #e2e8f0' }}
-                >
+                <button onClick={handleClearAll}
+                  style={{ background: '#f1f5f9', color: '#475569', border: 'none', padding: '8px 14px', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer', borderRight: '1px solid #e2e8f0' }}>
                   Clear All
                 </button>
                 <button
                   onClick={() => { setShowClearDropdown(p => !p); setShowRunDropdown(false); }}
                   disabled={Object.keys(groupedTests).length === 0 && nlHistoricalRuns.length === 0}
-                  style={{ background: '#f1f5f9', color: '#475569', border: 'none', padding: '8px 10px', fontWeight: 700, fontSize: '0.75rem', cursor: 'pointer' }}
-                >
+                  style={{ background: '#f1f5f9', color: '#475569', border: 'none', padding: '8px 10px', fontWeight: 700, fontSize: '0.75rem', cursor: 'pointer' }}>
                   ▾
                 </button>
               </div>
@@ -807,13 +907,10 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
                 <div style={{ position: 'absolute', top: 'calc(100% + 4px)', right: 0, background: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', boxShadow: '0 8px 24px rgba(0,0,0,0.12)', zIndex: 100, minWidth: '200px', overflow: 'hidden' }}>
                   <div style={{ padding: '6px 12px', fontSize: '0.7rem', fontWeight: 800, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid #f1f5f9' }}>Clear by batch</div>
                   {Object.entries(groupedTests).map(([section, tests]) => (
-                    <button
-                      key={section}
-                      onClick={() => handleClearSection(section)}
+                    <button key={section} onClick={() => handleClearSection(section)}
                       style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', padding: '8px 14px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.82rem', color: '#374151', fontWeight: 600, textAlign: 'left' }}
                       onMouseEnter={e => e.currentTarget.style.background = '#fef2f2'}
-                      onMouseLeave={e => e.currentTarget.style.background = 'none'}
-                    >
+                      onMouseLeave={e => e.currentTarget.style.background = 'none'}>
                       <span>{section}</span>
                       <span style={{ fontSize: '0.7rem', color: '#94a3b8', fontWeight: 600 }}>({(tests as any[]).length})</span>
                     </button>
@@ -821,12 +918,10 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
                   {nlHistoricalRuns.length > 0 && (
                     <>
                       {Object.keys(groupedTests).length > 0 && <div style={{ borderTop: '1px solid #f1f5f9' }} />}
-                      <button
-                        onClick={handleClearAllNL}
+                      <button onClick={handleClearAllNL}
                         style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', padding: '8px 14px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.82rem', color: '#7c3aed', fontWeight: 600, textAlign: 'left' }}
                         onMouseEnter={e => e.currentTarget.style.background = '#f5f3ff'}
-                        onMouseLeave={e => e.currentTarget.style.background = 'none'}
-                      >
+                        onMouseLeave={e => e.currentTarget.style.background = 'none'}>
                         <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                           <Sparkles size={12} /> NL Executions
                         </span>
@@ -838,15 +933,12 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
               )}
             </div>
 
-            {/* STOP EXECUTION */}
-            {isSuiteRunning && (
-              <button
-                type="button"
-                onClick={handleStopSuiteExecution}
+            {/* STOP EXECUTION — visible for suite AND NL runs */}
+            {(isSuiteRunning || isNLRunning) && (
+              <button type="button" onClick={handleStopSuiteExecution}
                 style={{ background: '#fff1f2', border: '1px solid #fecdd3', color: '#e11d48', padding: '8px 16px', borderRadius: '8px', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
                 onMouseEnter={e => e.currentTarget.style.background = '#ffe4e6'}
-                onMouseLeave={e => e.currentTarget.style.background = '#fff1f2'}
-              >
+                onMouseLeave={e => e.currentTarget.style.background = '#fff1f2'}>
                 <XCircle size={15} />
                 <span>Stop Execution</span>
               </button>
@@ -855,19 +947,15 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
             {/* RUN SUITE — split button */}
             {!isReadOnly && <div data-dropdown style={{ position: 'relative' }}>
               <div style={{ display: 'flex', borderRadius: '8px', overflow: 'visible' }}>
-                <button
-                  onClick={handleBulkExecution}
-                  disabled={isProcessing || stagedTests.length === 0}
-                  style={{ background: '#0f172a', color: '#fff', display: 'flex', alignItems: 'center', gap: '0.6rem', padding: '8px 18px', fontWeight: 700, border: 'none', cursor: 'pointer', borderRight: '1px solid rgba(255,255,255,0.15)', borderRadius: '8px 0 0 8px' }}
-                >
+                <button onClick={handleBulkExecution} disabled={isProcessing || stagedTests.length === 0}
+                  style={{ background: '#0f172a', color: '#fff', display: 'flex', alignItems: 'center', gap: '0.6rem', padding: '8px 18px', fontWeight: 700, border: 'none', cursor: 'pointer', borderRight: '1px solid rgba(255,255,255,0.15)', borderRadius: '8px 0 0 8px' }}>
                   {isSuiteRunning ? <Loader2 className="animate-spin" size={16} /> : null}
                   Run Suite
                 </button>
                 <button
                   onClick={() => { setShowRunDropdown(p => !p); setShowClearDropdown(false); }}
                   disabled={isProcessing || Object.keys(groupedTests).length === 0}
-                  style={{ background: '#0f172a', color: '#fff', border: 'none', padding: '8px 10px', fontWeight: 700, fontSize: '0.75rem', cursor: 'pointer', borderRadius: '0 8px 8px 0' }}
-                >
+                  style={{ background: '#0f172a', color: '#fff', border: 'none', padding: '8px 10px', fontWeight: 700, fontSize: '0.75rem', cursor: 'pointer', borderRadius: '0 8px 8px 0' }}>
                   ▾
                 </button>
               </div>
@@ -875,13 +963,10 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
                 <div style={{ position: 'absolute', top: 'calc(100% + 4px)', right: 0, background: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', boxShadow: '0 8px 24px rgba(0,0,0,0.12)', zIndex: 100, minWidth: '200px', overflow: 'hidden' }}>
                   <div style={{ padding: '6px 12px', fontSize: '0.7rem', fontWeight: 800, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid #f1f5f9' }}>Run by batch</div>
                   {Object.entries(groupedTests).map(([section, tests]) => (
-                    <button
-                      key={section}
-                      onClick={() => handleRunSection(section)}
+                    <button key={section} onClick={() => handleRunSection(section)}
                       style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', padding: '8px 14px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.82rem', color: '#374151', fontWeight: 600, textAlign: 'left' }}
                       onMouseEnter={e => e.currentTarget.style.background = '#f0fdf4'}
-                      onMouseLeave={e => e.currentTarget.style.background = 'none'}
-                    >
+                      onMouseLeave={e => e.currentTarget.style.background = 'none'}>
                       <span>{section}</span>
                       <span style={{ fontSize: '0.7rem', color: '#94a3b8', fontWeight: 600 }}>({(tests as any[]).length})</span>
                     </button>
@@ -893,7 +978,7 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
           </div>
         </div>
 
-        {/* ── QA REVIEWER: read-only completed executions panel ───────────── */}
+        {/* QA REVIEWER: read-only completed executions panel */}
         {isReadOnly ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
             {completedLoading ? (
@@ -922,15 +1007,10 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
                   }));
                 return (
                   <div key={cardId} style={{ border: '1px solid #e2e8f0', borderRadius: '12px', background: isExpanded ? '#f8fafc' : '#fff', overflow: 'hidden' }}>
-                    {/* Card header */}
-                    <div
-                      style={{ padding: '1rem 1.25rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
-                      onClick={() => setExpandedId(isExpanded ? null : cardId)}
-                    >
+                    <div style={{ padding: '1rem 1.25rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
+                      onClick={() => setExpandedId(isExpanded ? null : cardId)}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem', flex: 1 }}>
-                        {r.passed
-                          ? <CheckCircle2 color="#10b981" size={22} />
-                          : <XCircle color="#ef4444" size={22} />}
+                        {r.passed ? <CheckCircle2 color="#10b981" size={22} /> : <XCircle color="#ef4444" size={22} />}
                         <div>
                           <div style={{ fontWeight: 700, color: '#1e293b', fontSize: '1rem' }}>{r.title}</div>
                           <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 500, display: 'flex', gap: '0.5rem', alignItems: 'center', marginTop: '2px' }}>
@@ -944,34 +1024,24 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
                               {r.executed_at ? new Date(r.executed_at).toLocaleString() : ''}
                             </span>
                             {screenshots.length > 0 && (
-                              <>
-                                <span>•</span>
-                                <span style={{ display: 'flex', alignItems: 'center', gap: '3px', color: '#0891b2', fontSize: '0.72rem', fontWeight: 600 }}>
-                                  <ImageIcon size={11} /> {screenshots.length} screenshots
-                                </span>
-                              </>
+                              <><span>•</span>
+                              <span style={{ display: 'flex', alignItems: 'center', gap: '3px', color: '#0891b2', fontSize: '0.72rem', fontWeight: 600 }}>
+                                <ImageIcon size={11} /> {screenshots.length} screenshots
+                              </span></>
                             )}
                             {r.video_path && (
-                              <>
-                                <span>•</span>
-                                <span style={{ color: '#7c3aed', fontSize: '0.72rem', fontWeight: 600 }}>▶ video</span>
-                              </>
+                              <><span>•</span>
+                              <span style={{ color: '#7c3aed', fontSize: '0.72rem', fontWeight: 600 }}>▶ video</span></>
                             )}
                           </div>
                         </div>
                       </div>
                       <span style={{ fontSize: '0.7rem', color: '#94a3b8', transition: 'transform 0.2s', display: 'inline-block', transform: isExpanded ? 'rotate(0deg)' : 'rotate(-90deg)' }}>▼</span>
                     </div>
-
-                    {/* Expanded: step trace + slideshow + video */}
                     {isExpanded && (
                       <div style={{ padding: '1.25rem', borderTop: '1px solid #e2e8f0', background: '#ffffff' }}>
                         {renderStepTrace(r.step_results || [])}
-                        <SlideshowPanel
-                          screenshots={screenshots}
-                          isHeadfulOnly={screenshots.length === 0}
-                          videoPath={r.video_path}
-                        />
+                        <SlideshowPanel screenshots={screenshots} isHeadfulOnly={screenshots.length === 0} videoPath={r.video_path} />
                       </div>
                     )}
                   </div>
@@ -983,24 +1053,10 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
 
-          {/* ⚡ SWAPPED SWEEP: HISTORIC NATURAL LANGUAGE RUNS RENDERED AT THE TOP OF THE LIST STACK */}
           {nlHistoricalRuns.length > 0 && (
             <div style={{ marginBottom: '0.5rem' }}>
-              <div
-                onClick={() => toggleSection('nl_executions_section')}
-                style={{ 
-                  display: 'flex', 
-                  alignItems: 'center', 
-                  gap: '0.5rem', 
-                  padding: '0.6rem 0.75rem', 
-                  marginBottom: '0.5rem', 
-                  borderRadius: '8px', 
-                  background: '#f5f3ff', 
-                  border: '1px solid #ddd6fe', 
-                  cursor: 'pointer', 
-                  userSelect: 'none' 
-                }}
-              >
+              <div onClick={() => toggleSection('nl_executions_section')}
+                style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.6rem 0.75rem', marginBottom: '0.5rem', borderRadius: '8px', background: '#f5f3ff', border: '1px solid #ddd6fe', cursor: 'pointer', userSelect: 'none' }}>
                 <Sparkles size={14} color="#7c3aed" />
                 <span style={{ fontSize: '0.75rem', fontWeight: 800, color: '#7c3aed', textTransform: 'uppercase', letterSpacing: '0.06em', flex: 1 }}>
                   NL Executions
@@ -1019,12 +1075,13 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
                       tc={runItem}
                       result={testResults[runItem.title]}
                       isExpanded={expandedId === runItem.id}
-                      isRunning={false}
+                      isRunning={isNLRunning && expandedId === runItem.id}
                       isProcessing={isProcessing}
                       onExpand={() => setExpandedId(expandedId === runItem.id ? null : runItem.id)}
-                      onRun={null}
+                      onRun={isReadOnly ? null : handleRerunNL}
                       onRemove={handleRemoveNL}
                       renderStepTrace={renderStepTrace}
+                      onViewFullText={() => {}}
                     />
                   ))}
                 </div>
@@ -1032,7 +1089,6 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
             </div>
           )}
 
-          {/* STANDARD ACCORDION GROUPS */}
           {stagedTests.length === 0 ? (
             nlHistoricalRuns.length === 0 && (
               <div style={{ textAlign: 'center', padding: '4rem 0', color: '#94a3b8' }}>
@@ -1043,8 +1099,7 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
           ) : (
             Object.entries(groupedTests).map(([section, tests]) => (
               <div key={section}>
-                <div
-                  onClick={() => toggleSection(section)}
+                <div onClick={() => toggleSection(section)}
                   style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.6rem 0.75rem', marginBottom: '0.5rem', borderRadius: '8px', background: '#f8fafc', border: '1px solid #e2e8f0', cursor: 'pointer', userSelect: 'none' }}>
                   <Layers size={14} color="#6366f1" />
                   <span style={{ fontSize: '0.75rem', fontWeight: 800, color: '#6366f1', textTransform: 'uppercase', letterSpacing: '0.06em', flex: 1 }}>{section}</span>
@@ -1054,19 +1109,19 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
                 {expandedSections[section] !== false && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1rem' }}>
                     {(tests as any[]).map(tc => (
-                    <TestCard
-                      key={tc.id}
-                      tc={tc}
-                      result={testResults[tc.title]}
-                      isExpanded={expandedId === tc.id}
-                      isRunning={processingId === tc.id}
-                      isProcessing={isProcessing}
-                      onExpand={() => setExpandedId(expandedId === tc.id ? null : tc.id)}
-                      onRun={isReadOnly ? null : handleSingleExecution}
-                      onRemove={handleRemoveSingle}
-                      renderStepTrace={renderStepTrace}
-                    />
-                  ))}
+                      <TestCard
+                        key={tc.id}
+                        tc={tc}
+                        result={testResults[tc.title]}
+                        isExpanded={expandedId === tc.id}
+                        isRunning={processingId === tc.id}
+                        isProcessing={isProcessing}
+                        onExpand={() => setExpandedId(expandedId === tc.id ? null : tc.id)}
+                        onRun={isReadOnly ? null : handleSingleExecution}
+                        onRemove={handleRemoveSingle}
+                        renderStepTrace={renderStepTrace}
+                      />
+                    ))}
                   </div>
                 )}
               </div>
@@ -1074,7 +1129,7 @@ export const Executor: React.FC<ExecutorProps> = ({ selectedTestIdsForRun, clear
           )}
 
         </div>
-        )} {/* end isReadOnly ternary — closes the else branch wrapping the staged queue */}
+        )}
       </div>
 
       {lightboxImg && (

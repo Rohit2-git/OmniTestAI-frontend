@@ -15,7 +15,6 @@ import { UserManagement } from './components/UserManagement';
 import { TokenUsage } from './components/TokenUsage';
 
 function AppContent() {
-  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [selectedTestIdsForRun, setSelectedTestIdsForRun] = useState<string[]>([]);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(false);
@@ -51,7 +50,6 @@ function AppContent() {
             <Executor
               selectedTestIdsForRun={selectedTestIdsForRun}
               clearSelectedTests={clearSelectedTests}
-              readOnly={user?.role === 'qa_reviewer'}
             />
           </ProtectedRoute>
         );

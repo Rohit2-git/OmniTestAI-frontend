@@ -19,7 +19,6 @@ const ROLE_COLORS: Record<string, { bg: string; color: string; label: string }> 
 export const UserManagement: React.FC = () => {
   const { user: currentUser } = useAuth();
   const isAdmin = currentUser?.role === 'admin';
-  const isQaEngineer = currentUser?.role === 'qa_engineer';
 
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [activeTab, setActiveTab] = useState<'users' | 'requests' | 'access'>(isAdmin ? 'users' : 'access');
@@ -50,7 +49,7 @@ export const UserManagement: React.FC = () => {
   const [accessSuccess, setAccessSuccess] = useState('');
   const [isSavingAccess, setIsSavingAccess] = useState(false);
 
-  const API_BASE = 'http://localhost:8000';
+  const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
   // Auth is cookie-based (httpOnly), so credentials: 'include' on each fetch
   // is what actually authenticates these requests — no Authorization header needed.

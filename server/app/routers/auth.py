@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, Response, status  # type: ignore
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status  # type: ignore
 from pydantic import BaseModel, EmailStr  # type: ignore
-
 from app.database import db
 from app.auth.security import create_access_token, hash_password, verify_password
 from app.auth.middleware import get_current_user, require_role, COOKIE_NAME
+from app.rate_limiter import check_login_allowed, record_login_failure, record_login_success, RateLimitExceeded
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -68,12 +68,27 @@ async def register(payload: RegisterRequest):
     return user
 
 @router.post("/login", response_model=UserOut)
-async def login(payload: LoginRequest, response: Response):
+async def login(payload: LoginRequest, response: Response, request: Request):
+    ip = request.client.host if request.client else "unknown"
+
+    # Check if this IP is locked out before touching the DB
+    try:
+        check_login_allowed(ip)
+    except RateLimitExceeded as e:
+        raise HTTPException(
+            status_code=429,
+            detail=str(e),
+            headers={"Retry-After": str(e.retry_after)},
+        )
+
     user = await db.user.find_unique(where={"email": payload.email})
     if not user or not verify_password(payload.password, user.passwordHash):
+        record_login_failure(ip)
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.isActive:
         raise HTTPException(status_code=403, detail="Account is disabled")
+
+    record_login_success(ip)
     token = create_access_token(user_id=user.id, email=user.email, role=user.role)
     response.set_cookie(key=COOKIE_NAME, value=token, **COOKIE_KWARGS)
     return user

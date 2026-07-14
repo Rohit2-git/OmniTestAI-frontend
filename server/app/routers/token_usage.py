@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends
 from typing import Optional
 
 from app.auth.middleware import require_role
+from app.database import db
 
 router = APIRouter()
 
@@ -70,10 +71,27 @@ def _load_log() -> list:
 
 
 @router.get("/api/token-usage")
-def get_token_usage(app_id: Optional[str] = None, _=Depends(require_role("admin"))):
+async def get_token_usage(app_id: Optional[str] = None, _=Depends(require_role("admin"))):
     entries = _load_log()
+
+    # ── Live-app filter ────────────────────────────────────────────────
+    # Entries can reference app_ids from apps that no longer exist (e.g. an
+    # app was recreated during a schema/db reset and got a new id). Those
+    # entries are real history but should never inflate "All Apps" totals
+    # for apps that are gone. We resolve this by checking against the
+    # Application table directly, rather than trusting every app_id in the
+    # log file blindly.
+    live_apps = await db.application.find_many()
+    live_app_ids = {a.id for a in live_apps}
+
     if app_id:
         entries = [e for e in entries if e.get("app_id") == app_id]
+    else:
+        # "All Apps" view: only count entries whose app_id still exists.
+        # Entries with a missing/None app_id, or an app_id that was deleted
+        # or superseded, are excluded from aggregate totals but remain in
+        # the log file untouched for audit purposes.
+        entries = [e for e in entries if e.get("app_id") in live_app_ids]
 
     enriched = [{**e, "cost_usd": _calc_cost(e.get("model", "gemini-3-flash-preview"), e.get("input_tokens", 0), e.get("output_tokens", 0))} for e in entries]
 

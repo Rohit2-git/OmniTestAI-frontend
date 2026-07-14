@@ -16,6 +16,7 @@ from app.services.llm_service import (
 from app.routers.test_data import find_best_template, find_default_condition, get_condition_fields, resolve_template_values, get_batch_records
 from app.services.synthetic_data import pick_synthetic_record
 from app.auth.middleware import get_current_user
+from app.rate_limiter import check_generation, RateLimitExceeded
 from app.database import db
 
 router = APIRouter(prefix="/tests", tags=["generate"])
@@ -59,6 +60,16 @@ async def generate_tests_from_document(
     test_data_id: Optional[str] = Form(None),
     current_user=Depends(get_current_user)
 ):
+    # Rate limit: 5 generations per user per 10 minutes
+    try:
+        check_generation(current_user.id)
+    except RateLimitExceeded as e:
+        raise HTTPException(
+            status_code=429,
+            detail=str(e),
+            headers={"Retry-After": str(e.retry_after)},
+        )
+
     has_doc = file and file.filename
     wireframes = [w for w in (wireframes or []) if w and w.filename]
     has_wireframe = bool(wireframes)
@@ -230,7 +241,8 @@ async def generate_tests_from_document(
                     app_id=str(app_id) if app_id else None,
                     batch_label=batch_label,
                     base_url=app_base_url,
-                    test_data=this_case_test_data
+                    test_data=this_case_test_data,
+                    image_parts=image_parts
                 )
 
                 tc_result["test_data_source_type"] = matched_source_type if this_case_test_data else None

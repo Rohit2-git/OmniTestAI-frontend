@@ -10,6 +10,7 @@ import sys
 import tempfile
 import shutil
 import base64
+import time
 from typing import List, Dict, Any
 
 
@@ -70,17 +71,21 @@ class NLExecutor:
             Return a single flat JSON object:
             {{
                 "action_type": "navigate" | "click" | "type" | "scroll" | "wait" | "goal_achieved",
-                "target": "semantic description of the element (e.g. 'search bar', 'email field', 'submit button')",
-                "value": "input string value or 'until_visible'"
+                "target": "the EXACT visible text of the element, copied character-for-character",
+                "value": "input string value or 'until_visible'",
+                "context": "optional — only needed for disambiguation, see rule 7"
             }}
             
             RULES:
             1. Keep answers concise. Do not add conversational text padding inside values.
             2. For typing into a search box: action_type="type", target="search bar", value="the search text".
             3. Never use DOM-specific labels like element IDs or CSS selectors in target.
-            4. Use common semantic names: "search bar", "email field", "password field", "username field", "submit button".
+            4. For type/scroll/wait actions, common semantic names are fine for target: "search bar", "email field", "password field", "username field".
             5. If the objective is visible and completed, immediately choose action_type 'goal_achieved'.
             6. Do NOT append \\n to value — the executor handles Enter key automatically after typing.
+            7. For "click" actions: "target" MUST be copied character-for-character from inside the quotes of one of the "Visible Page Items" lines below — never a paraphrase or description of what the element does. For example if the list shows [button] "Add to cart", target must be exactly "Add to cart" — never "Add to cart button for Sauce Labs Backpack".
+            8. If several items in the list have the exact same visible text (e.g. multiple "Add to cart" buttons), find the one whose "(near: "...")" annotation matches what the goal is asking for, and put that nearby text in "context" (e.g. context="Sauce Labs Backpack"). Omit "context" entirely when there's only one match or no annotation is relevant.
+            9. Do NOT choose action_type="wait" to pace yourself or "let the page settle" — the executor already waits for the page to finish loading before every single decision you make, automatically. Only use "wait" if the goal explicitly asks you to wait for a specific duration or condition to appear. Using "wait" for any other reason wastes a step and produces a useless screenshot — go straight to the next real action instead.
             """
             
             config = types.GenerateContentConfig(
@@ -158,7 +163,14 @@ class NLExecutor:
             normalized_decision = {}
             for k, v in parsed_json.items():
                 clean_key = str(k).lower().replace("_", "").replace("-", "").strip()
-                if "type" in clean_key or "action" in clean_key:
+                if clean_key == "context":
+                    # Must be checked before the value/text/input branch below —
+                    # "context" contains the substring "text" and would otherwise
+                    # get misrouted into normalized_decision["value"].
+                    ctx = str(v).strip()
+                    if ctx and ctx.lower() not in ("none", "null", "n/a", ""):
+                        normalized_decision["context"] = ctx
+                elif "type" in clean_key or "action" in clean_key:
                     normalized_decision["action_type"] = str(v).lower().strip()
                 elif "target" in clean_key or "element" in clean_key or "locator" in clean_key:
                     normalized_decision["target"] = str(v).strip()
@@ -180,7 +192,102 @@ class NLExecutor:
             traceback.print_exc()
             return {"action_type": "wait", "target": "body", "value": "2"}
 
-    async def _run_autonomous_agent_loop(self, url: str, goal: str, max_steps: int) -> Dict[str, Any]:
+    async def _call_gemini_step_rewriter(
+        self,
+        goal: str,
+        failed_step: str,
+        error_detail: str,
+        clean_layout: str,
+        screenshot_bytes: bytes = None,
+    ) -> dict:
+        """
+        When self-healing can't recover a step (bad JSON, empty DOM, browser closed),
+        ask Gemini to look at the current page state and rewrite what the *next* action
+        should be from scratch — effectively continuing the goal from the current position.
+
+        Returns the same dict shape as _call_gemini_agent:
+          {"action_type": "...", "target": "...", "value": "..."}
+        """
+        from google import genai  # type: ignore
+        from google.genai import types  # type: ignore
+        import base64 as _b64
+
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if not gemini_key:
+            return {"action_type": "wait", "target": "body", "value": "2"}
+
+        try:
+            client = genai.Client(api_key=gemini_key)
+            model_name = os.getenv("GOOGLE_MODEL", "gemini-3-flash-preview")
+
+            text_prompt = f"""You are a QA automation recovery engine.
+
+A step in an autonomous browser test has failed and self-healing was unable to fix it.
+Your job is to look at the current page state and decide what the NEXT action should be
+to continue progressing toward the goal — do NOT repeat the failed step blindly.
+
+=== GOAL ===
+{goal}
+
+=== FAILED STEP ===
+{failed_step}
+
+=== FAILURE REASON ===
+{error_detail}
+
+=== CURRENT PAGE VISIBLE ELEMENTS ===
+{clean_layout}
+
+Decide the single best next action to advance toward the goal.
+Return ONLY a flat JSON object (no markdown):
+{{
+    "action_type": "navigate" | "click" | "type" | "scroll" | "wait" | "goal_achieved",
+    "target": "semantic description of element",
+    "value": "input value, URL, or direction"
+}}"""
+
+            contents = []
+            if screenshot_bytes:
+                try:
+                    img_b64 = _b64.b64encode(screenshot_bytes).decode("utf-8")
+                    contents.append(types.Part.from_bytes(
+                        data=_b64.b64decode(img_b64), mime_type="image/png"
+                    ))
+                except Exception as _ie:
+                    print(f"[Step rewriter screenshot error]: {_ie}")
+            contents.append(text_prompt)
+
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=model_name,
+                contents=contents,
+                config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=512)
+            )
+
+            raw = (response.text or "").strip()
+            if "```" in raw:
+                raw = raw.split("```json")[-1].split("```")[0].strip() if "```json" in raw else raw.split("```")[1].split("```")[0].strip()
+
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                match = re.search(r"\{.*\}", raw, re.DOTALL)
+                if match:
+                    parsed = json.loads(match.group(0))
+                else:
+                    return {"action_type": "wait", "target": "body", "value": "2"}
+
+            return {
+                "action_type": parsed.get("action_type", "wait"),
+                "target": parsed.get("target", "body"),
+                "value": parsed.get("value", "2"),
+            }
+
+        except Exception as e:
+            print(f"[Step rewriter error]: {e}")
+            return {"action_type": "wait", "target": "body", "value": "2"}
+
+    async def _run_autonomous_agent_loop(self, url: str, goal: str, max_steps: int, cancel_event=None) -> Dict[str, Any]:
         """Internal worker function running the closed-loop perception-action cycles."""
         from playwright.async_api import async_playwright # type: ignore
         from app.executors.playwright import _execute_step, _screenshot_to_base64, _video_to_base64
@@ -239,12 +346,64 @@ class NLExecutor:
                     screenshot_paths.append(_saved_path)
 
                 # Step 2: Main Agent Execution Cycle
+                # WALL-CLOCK SAFETY NET: max_steps alone is no longer a tight cap (it's
+                # now generous — see execute.py) since we don't want to artificially
+                # truncate a genuinely long goal. But an uncapped step count with no
+                # time bound is a real cost/liability risk on a billable, commercial
+                # product: a goal that never converges (stuck page, endlessly missed
+                # locator) could otherwise run indefinitely. This timeout is the actual
+                # backstop — independent of how many steps were configured.
+                _loop_start_time = time.monotonic()
+                _MAX_LOOP_SECONDS = 240  # 4 minutes wall-clock, regardless of step count
                 for run_step in range(2, max_steps + 1):
-                    # SPEED UP OPTIMIZATION: Switched local sync waiting flags over to instant checks
-                    await page.wait_for_load_state("commit")
+                    if time.monotonic() - _loop_start_time > _MAX_LOOP_SECONDS:
+                        step_results.append({
+                            "step_number": len(step_results) + 1,
+                            "step": "Execution Timeout",
+                            "status": "failed",
+                            "detail": f"Exceeded {_MAX_LOOP_SECONDS}s wall-clock limit after {run_step - 1} steps — the goal did not converge in a reasonable amount of time."
+                        })
+                        break
+                    # Check if stop was requested before each step
+                    if cancel_event is not None and cancel_event.is_set():
+                        step_results.append({
+                            "step_number": run_step,
+                            "step": "Execution stopped by user",
+                            "status": "failed",
+                            "detail": "NL execution cancelled by user."
+                        })
+                        # Close browser cleanly before returning aborted signal
+                        try:
+                            await context.close()
+                            await browser.close()
+                        except Exception:
+                            pass
+                        # Delete any screenshots saved so far
+                        for p in screenshot_paths:
+                            try:
+                                from app.services.media_storage import SCREENSHOTS_DIR, VIDEOS_DIR
+                                import os as _os2
+                                full = _os2.path.join(SCREENSHOTS_DIR, _os2.path.basename(p))
+                                if _os2.path.exists(full):
+                                    _os2.remove(full)
+                            except Exception:
+                                pass
+                        shutil.rmtree(video_dir, ignore_errors=True)
+                        return {
+                            "aborted": True,
+                            "title": "Autonomous Goal Execution",
+                            "passed": False,
+                            "total_steps": len(step_results),
+                            "executed_steps": len(step_results),
+                            "step_results": step_results,
+                            "screenshots": [],
+                            "screenshot_paths": [],
+                            "video_base64": None,
+                            "video_path": None
+                        }
+                    await page.wait_for_load_state("domcontentloaded", timeout=5000)
                     
-                    # SPEED UP OPTIMIZATION: Stripped paragraph tags and large non-functional text payloads completely 
-                    # out of the JavaScript evaluator to reduce contextual input token load overhead
+                    # Extract visible interactive elements from the current page state
                     clean_layout = await page.evaluate("""() => {
                         let textContent = [];
                         let h = window.innerHeight;
@@ -268,7 +427,25 @@ class NLExecutor:
                                 let visibleText = el.innerText || el.placeholder || el.value || el.getAttribute('aria-label') || '';
                                 visibleText = visibleText.replace(/\\s+/g, ' ').trim();
                                 if (visibleText && visibleText.length < 100) { // Excludes heavy multi-line description text wrapping block sections
-                                    textContent.push(`[${el.tagName.toLowerCase()}] "${visibleText}"`);
+                                    // Walk up a few ancestor levels looking for a nearby distinguishing
+                                    // label (product/item name, card title, etc). This is what lets the
+                                    // agent tell apart repeated identical controls — e.g. six separate
+                                    // "Add to cart" buttons on a product listing page.
+                                    let nearby = '';
+                                    let node = el.closest('div, li, article, section') || el.parentElement;
+                                    let hops = 0;
+                                    while (node && hops < 4 && !nearby) {
+                                        const heading = node.querySelector('h1, h2, h3, h4, h5, [class*="name"], [class*="title"]');
+                                        if (heading) {
+                                            let t = (heading.innerText || '').replace(/\\s+/g, ' ').trim();
+                                            if (t && t !== visibleText && t.length < 80) nearby = t;
+                                        }
+                                        node = node.parentElement;
+                                        hops++;
+                                    }
+                                    textContent.push(nearby
+                                        ? `[${el.tagName.toLowerCase()}] "${visibleText}" (near: "${nearby}")`
+                                        : `[${el.tagName.toLowerCase()}] "${visibleText}"`);
                                 }
                             }
                         });
@@ -280,6 +457,7 @@ class NLExecutor:
                     action = decision["action_type"]
                     target = decision["target"]
                     val = decision["value"]
+                    click_context = decision.get("context")
 
                     if action == "goal_achieved":
                         passed = True
@@ -298,6 +476,12 @@ class NLExecutor:
                         formatted_instruction = f"Navigate to '{target}'"
                     elif action == "click":
                         formatted_instruction = f"Click '{target}'"
+                        if click_context:
+                            # Recognized by _execute_step in playwright.py to scope the
+                            # locator search to the container holding this nearby text —
+                            # resolves ambiguity when multiple identical controls exist
+                            # (e.g. several "Add to cart" buttons on a listing page).
+                            formatted_instruction += f" [context: {click_context}]"
                     elif action == "type":
                         clean_val = val.replace("\n", "").replace("\r", "")
                         # Use intent-based phrasing — avoids playwright looking for literal label "Search input field"
@@ -370,12 +554,23 @@ class NLExecutor:
                         result = await _execute_step(page, formatted_instruction)
 
                     if action == "type" and result["status"] == "passed":
-                        try:
-                            await page.keyboard.press("Enter")
-                            await page.wait_for_load_state("commit", timeout=3000)
-                            formatted_instruction += " and submitted search"
-                        except:
-                            pass
+                        # Only press Enter for search/query fields — NOT for username/password/email
+                        # fields in a multi-field form. Pressing Enter after username submits the
+                        # form before the password field is filled, causing both values to land
+                        # in the first visible field on the next iteration.
+                        target_lower_check = target.lower()
+                        is_search_field = any(w in target_lower_check for w in ["search", "query", "find", "lookup"])
+                        is_credential_field = any(w in target_lower_check for w in [
+                            "password", "pass", "username", "user name", "email", "mail", "login"
+                        ])
+                        should_press_enter = is_search_field and not is_credential_field
+                        if should_press_enter:
+                            try:
+                                await page.keyboard.press("Enter")
+                                await page.wait_for_load_state("commit", timeout=3000)
+                                formatted_instruction += " and submitted search"
+                            except:
+                                pass
 
                     operation_history.append(f"Action {run_step}: {formatted_instruction}")
 
@@ -406,10 +601,33 @@ class NLExecutor:
                         pass
 
                     if result["status"] == "failed":
-                        break
+                        # Step failed — before giving up, ask Gemini to rewrite the next
+                        # action based on the current page state (visual + layout).
+                        print(f"[NL Agent] Step {run_step} failed: {result['detail']} — invoking step rewriter")
+                        try:
+                            _rewrite_screenshot = await page.screenshot(type="png")
+                        except Exception:
+                            _rewrite_screenshot = None
+                        rewritten = await self._call_gemini_step_rewriter(
+                            goal=goal,
+                            failed_step=formatted_instruction,
+                            error_detail=result["detail"],
+                            clean_layout=clean_layout,
+                            screenshot_bytes=_rewrite_screenshot,
+                        )
+                        # If rewriter says goal is achieved or suggests wait (stuck signal), stop
+                        if rewritten["action_type"] in ("goal_achieved", "wait") or rewritten == decision:
+                            break
+                        # Otherwise override the decision for this iteration — loop will execute it
+                        # on the next cycle naturally, so just log and continue
+                        operation_history.append(
+                            f"[STEP-REWRITTEN] Original: {formatted_instruction} → Rewriter suggests: {rewritten['action_type']} '{rewritten['target']}'"
+                        )
+                        # Patch the step_results entry to show rewrite happened
+                        step_results[-1]["detail"] += f" | Step rewriter activated → next: {rewritten['action_type']} '{rewritten['target']}'"
+                        # Don't break — continue the loop; rewriter's suggestion becomes next Gemini context
                         
-                    # SPEED UP OPTIMIZATION: Reduced explicit task sleep cooldown loop anchors down to 200ms
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.05)
 
             except Exception as loop_crash:
                 step_results.append({
@@ -418,6 +636,22 @@ class NLExecutor:
                     "status": "failed",
                     "detail": str(loop_crash)
                 })
+
+            # ── Determine overall pass/fail ────────────────────────────────
+            # Gemini doesn't always emit goal_achieved even when the goal is done
+            # (it may just run out of steps naturally). So we evaluate the result
+            # based on the step outcomes, not just the goal_achieved signal.
+            if not passed:
+                completed_steps = [s for s in step_results if s["step"] != "Execution stopped by user"]
+                passed_steps = [s for s in completed_steps if s["status"] == "passed"]
+                failed_steps = [s for s in completed_steps if s["status"] == "failed"]
+                # Treat as passed if: at least one action step ran, more passed than
+                # failed, and no unrecoverable exception (loop_crash) occurred.
+                has_action_steps = len(completed_steps) > 1  # more than just the navigate step
+                majority_passed = len(passed_steps) > len(failed_steps)
+                no_crash = not any("Exception Handler" in s["step"] for s in step_results)
+                if has_action_steps and majority_passed and no_crash:
+                    passed = True
 
             await context.close()
             await browser.close()
@@ -448,7 +682,7 @@ class NLExecutor:
             "video_path": video_path
         }
 
-    async def execute_autonomous_goal(self, url: str, goal: str, max_steps: int = 8, app_id: str = None, batch_label: str = None) -> Dict[str, Any]:
+    async def execute_autonomous_goal(self, url: str, goal: str, max_steps: int = 8, app_id: str = None, batch_label: str = None, cancel_event=None) -> Dict[str, Any]:
         """Public Execution Interface."""
         self._current_app_id = app_id
         self._current_batch_label = batch_label
@@ -466,10 +700,8 @@ class NLExecutor:
                 "video_base64": None,
                 "video_path": None
             }
+        import functools
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            _run_in_new_loop,
-            self._run_autonomous_agent_loop(url, goal, max_steps)
-        )
+        fn = functools.partial(_run_in_new_loop, self._run_autonomous_agent_loop(url, goal, max_steps, cancel_event))
+        result = await loop.run_in_executor(None, fn)
         return result

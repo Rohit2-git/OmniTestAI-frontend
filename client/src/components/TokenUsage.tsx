@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
-import { useAuth } from '../context/AuthContext';
 import { Coins, Zap, TrendingUp, RefreshCw, Trash2, ChevronDown, ChevronUp, Info } from 'lucide-react';
 
 const MODEL_DISPLAY: Record<string, { label: string; inputPrice: number; outputPrice: number; color: string }> = {
@@ -37,7 +36,6 @@ const typeLabel = (type: string) => {
 
 export const TokenUsage: React.FC = () => {
   const { activeAppId, applications } = useApp();
-  const { token } = useAuth();
   const [data, setData]                       = useState<any>(null);
   const [loading, setLoading]                 = useState(false);
   const [filterAll, setFilterAll]             = useState(false);
@@ -47,10 +45,9 @@ export const TokenUsage: React.FC = () => {
   const [showModelPanel, setShowModelPanel]   = useState(false);
 
   const activeApp = applications.find(a => a.id === activeAppId);
-  const API_BASE = 'http://localhost:8000';
+  const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
   const authHeaders = {
     'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {})
   };
 
   const fetchData = useCallback(async () => {
@@ -64,7 +61,7 @@ export const TokenUsage: React.FC = () => {
       setData(await res.json());
     } catch (e) { console.error(e); }
     finally { setLoading(false); }
-  }, [activeAppId, filterAll, token]);
+  }, [activeAppId, filterAll]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
