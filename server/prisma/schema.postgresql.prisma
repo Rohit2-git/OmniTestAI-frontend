@@ -99,6 +99,29 @@ model ExecutionResult {
   createdAt      DateTime     @default(now())
 }
 
+// Cached result of a Playwright discovery crawl of an Application's live URL.
+// One row per app — re-scouting overwrites the same row rather than piling up
+// history, since only the current workflow inventory matters for the Coverage
+// Index. pageLimit is user-configurable (Coverage tab settings) and controls
+// how many same-origin pages the next scout/rescan crawls.
+model AppScoutProfile {
+  id                 String    @id @default(cuid())
+  appId              String    @unique
+  status             String    @default("pending")
+  errorMessage       String?
+  pageLimit          Int       @default(15)
+  pagesScanned       Int       @default(0)
+  totalElements      Int       @default(0)
+  workflows          String    @default("[]")
+  estimatedTestCases Int       @default(0)
+  scoutDurationSec   Float?
+  authAttempted      Boolean   @default(false)
+  authSucceeded      Boolean   @default(false)
+  scoutedAt          DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+}
+
 model KnowledgeAsset {
   id        Int      @id @default(autoincrement())
   appId     String

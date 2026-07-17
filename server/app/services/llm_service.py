@@ -585,3 +585,130 @@ async def generate_test_cases_from_both_multi(content: str, image_list: list, co
     image_parts = [types.Part.from_bytes(data=b, mime_type=mt) for b, mt in image_list]
     blueprints = await discover_test_blueprints(content=content, image_parts=image_parts, context=context, count=count, app_id=app_id, batch_label=batch_label)
     return await _expand_all(blueprints, context, app_id=app_id, batch_label=batch_label, base_url=base_url, image_parts=image_parts)
+
+def _looks_already_executable(steps_text: str) -> list | None:
+    """
+    Heuristic gate for the CSV import feature: manual QA steps that already
+    read like atomic, literal actions (quoted values + action verbs, e.g.
+    "Enter 'admin' in the Username field") don't need an AI rewrite at all —
+    importing them as-is costs zero tokens and preserves the tester's exact
+    wording. Returns the split step list if the text clears this bar, else
+    None (caller should run the AI normalization pass instead).
+    """
+    lines = [l.strip() for l in re.split(r'[\n;]+', steps_text or "") if l.strip()]
+    if len(lines) < 2:
+        return None
+    action_verbs = ('click', 'enter', 'select', 'navigate', 'type', 'check', 'choose',
+                    'press', 'tap', 'verify', 'scroll', 'open', 'go to', 'submit')
+    executable_count = sum(
+        1 for l in lines
+        if ("'" in l or '"' in l) and any(v in l.lower() for v in action_verbs)
+    )
+    # Require most lines to look atomic — a stray vague line mixed in with
+    # otherwise-literal steps is fine and still safe to import verbatim.
+    if executable_count >= max(2, int(len(lines) * 0.6)):
+        return lines
+    return None
+
+
+async def normalize_manual_test_case(
+    title: str,
+    raw_steps_text: str,
+    expected_result: str = None,
+    app_id: str = None,
+    batch_label: str = None,
+    base_url: str = None,
+    image_parts: List[Any] = None
+) -> dict:
+    """
+    Converts one manually-written CSV test case into the same executable step
+    format used everywhere else in the platform (matches ExpandedTestCaseSchema).
+    Already-atomic steps are kept verbatim at zero AI cost via
+    _looks_already_executable; only genuinely high-level/descriptive steps get
+    rewritten via Gemini, using the same repair/retry approach as Pass 2 generation.
+    """
+    already_executable = _looks_already_executable(raw_steps_text)
+    if already_executable:
+        return {
+            "title": title or "Untitled Test Case",
+            "steps": already_executable,
+            "expected_result": expected_result or "Passed",
+            "type": "positive",
+        }
+
+    base_url_line = f"\nApplication base URL: {base_url}" if base_url else ""
+    prompt = f"""You are converting a manually-written QA test case into precise, atomic,
+machine-executable browser automation steps for a Playwright-based test runner.
+
+Test case title: {title or "Untitled Test Case"}
+Tester's original steps (may be high-level or vague):
+\"\"\"{raw_steps_text}\"\"\"
+Tester's original expected result: {expected_result or "(not specified — infer a reasonable one from the steps)"}{base_url_line}
+
+Rewrite the steps as a JSON object with "title", "steps" (a list of 3-8 atomic actions,
+each phrased like "Navigate to <url>", "Enter '<value>' in the <field> field",
+"Click '<label>'", "Select '<option>' from the <name> dropdown"), and "expected_result".
+Preserve the tester's original intent and expected outcome exactly — do not invent new
+behavior or extra verification steps they did not ask for. If the tester's steps already
+imply specific field values (like a username), keep those exact values.
+"""
+
+    config = types.GenerateContentConfig(
+        temperature=0.1,
+        response_mime_type="application/json",
+        response_schema=ExpandedTestCaseSchema,
+        max_output_tokens=8192
+    )
+    contents = [prompt] + list(image_parts) if image_parts else prompt
+
+    last_error = None
+    for attempt in range(3):
+        try:
+            response = await _asyncio.to_thread(
+                client.models.generate_content,
+                model="gemini-3-flash-preview",
+                contents=contents,
+                config=config
+            )
+            tokens = _extract_tokens(response)
+            _append_token_log({
+                "id": f"import-csv-{int(datetime.utcnow().timestamp()*1000)}",
+                "timestamp": datetime.utcnow().isoformat(),
+                "type": "csv_import_normalize",
+                "model": "gemini-3-flash-preview",
+                "app_id": app_id,
+                "batch_label": batch_label,
+                "test_title": title,
+                "input_tokens": tokens["input_tokens"],
+                "output_tokens": tokens["output_tokens"],
+                "total_tokens": tokens["total_tokens"],
+            })
+            try:
+                parsed = _safe_parse_json(response.text)
+            except ValueError:
+                repaired = _repair_truncated_step_json(response.text)
+                if repaired is None:
+                    raise
+                print(f"[CSV import recovery] Salvaged {len(repaired['steps'])} complete steps "
+                      f"from a truncated response for '{title}'.")
+                parsed = repaired
+            steps = parsed.get("steps", [])
+            if not steps or not isinstance(steps, list) or len(steps) < 2:
+                raise ValueError(f"Insufficient steps ({len(steps)}) — retrying")
+            parsed["steps"] = steps
+            parsed.setdefault("title", title or "Untitled Test Case")
+            parsed.setdefault("expected_result", expected_result or "Passed")
+            parsed.setdefault("type", "positive")
+            return parsed
+        except Exception as e:
+            last_error = e
+            print(f"[CSV import normalize error] attempt {attempt + 1}/3, '{title}': {type(e).__name__}: {e}")
+            if attempt < 2:
+                await _asyncio.sleep(0.5)
+                continue
+            return {
+                "title": f"⚠️ Import normalization failed — {title or 'Untitled'}",
+                "steps": [f"Navigate to {base_url}" if base_url else "Navigate to the application homepage"],
+                "expected_result": f"Could not automatically convert this manual test case into executable steps ({type(last_error).__name__}: {str(last_error)[:150]}). Please edit manually.",
+                "type": "positive",
+            }

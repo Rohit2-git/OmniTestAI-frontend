@@ -1,5 +1,9 @@
 import json
+import os
 import re
+import csv
+import io
+import time
 import asyncio
 from datetime import timedelta
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request, Depends # type: ignore
@@ -12,6 +16,7 @@ from app.services.llm_service import (
     expand_single_test_case,
     generate_test_cases_from_images,
     generate_test_cases_from_both_multi,
+    normalize_manual_test_case,
 )
 from app.routers.test_data import find_best_template, find_default_condition, get_condition_fields, resolve_template_values, get_batch_records
 from app.services.synthetic_data import pick_synthetic_record
@@ -40,6 +45,146 @@ _ROLE_VISIBILITY = {
 
 class _GenerationAborted(Exception):
     pass
+
+
+# Same path llm_service.py's _append_token_log writes to — reading it back
+# here (filtered by this run's unique batch_label) is how the Tech Logs modal
+# gets REAL Gemini call data (model, tokens, whether the Pass 1 top-up fired)
+# instead of the previous hardcoded "kernel telemetry" flavor text.
+_TOKEN_LOG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "token_usage_log.json")
+
+
+def _build_generation_trace(batch_label: str, pass1_time_sec: float, pass2_time_sec: float) -> dict:
+    events = []
+    try:
+        path = os.path.abspath(_TOKEN_LOG_PATH)
+        if os.path.exists(path):
+            with open(path, "r") as f:
+                all_entries = json.load(f)
+            events = [e for e in all_entries if e.get("batch_label") == batch_label]
+    except Exception as e:
+        print(f"[generate] Could not read token usage log for trace: {e}")
+
+    pass1_events = [e for e in events if e.get("type") == "generation_pass1"]
+    topup_events = [e for e in events if e.get("type") == "generation_pass1_topup"]
+    pass2_events = [e for e in events if e.get("type") == "generation_pass2"]
+
+    def _sum(entries, key):
+        return sum(e.get(key, 0) or 0 for e in entries)
+
+    model_name = events[0]["model"] if events else "gemini-3-flash-preview"
+
+    return {
+        "model": model_name,
+        "pass1_time_sec": round(pass1_time_sec, 1),
+        "pass2_time_sec": round(pass2_time_sec, 1),
+        "total_time_sec": round(pass1_time_sec + pass2_time_sec, 1),
+        "topup_fired": bool(topup_events),
+        "pass1_input_tokens": _sum(pass1_events, "input_tokens"),
+        "pass1_output_tokens": _sum(pass1_events, "output_tokens"),
+        "topup_input_tokens": _sum(topup_events, "input_tokens"),
+        "topup_output_tokens": _sum(topup_events, "output_tokens"),
+        "pass2_input_tokens": _sum(pass2_events, "input_tokens"),
+        "pass2_output_tokens": _sum(pass2_events, "output_tokens"),
+        "total_tokens": _sum(events, "total_tokens"),
+        "pass2_call_count": len(pass2_events),
+        # Raw events so the frontend can render one real log line per Gemini
+        # call (type, model, tokens, timestamp) instead of fabricated copy.
+        "events": events,
+    }
+
+
+_TITLE_COLS = {"title", "test case", "test case title", "name", "test name", "scenario", "test scenario"}
+_ID_COLS = {"test case id", "id", "tc id", "case id", "test id", "tcid"}
+_DESC_COLS = {"test case description", "description", "test description", "summary", "objective"}
+_STEPS_COLS = {"steps", "test steps", "step", "action", "actions", "test case steps"}
+_EXPECTED_COLS = {"expected result", "expected", "expected outcome", "expected results"}
+
+
+def _normalize_header(h: str) -> str:
+    return re.sub(r'\s+', ' ', (h or "").strip().lower())
+
+
+def _parse_manual_csv(raw_text: str) -> List[dict]:
+    """
+    Groups CSV rows into test cases. Column names are matched flexibly
+    (case-insensitive, several common synonyms) so this isn't locked to one
+    exact export format. Supports two common shapes:
+
+    1. One row per test case, identified by an ID and/or Description column
+       (e.g. "Test Case ID" / "Test Case Description" - the standard
+       TestRail/Excel export shape), with all steps in a single multi-line
+       "Test Steps" cell.
+    2. One row per step, with a blank title/id/desc marking "same test case
+       as the row above" - the TestRail/Zephyr continuation-row pattern.
+
+    IMPORTANT: a row only counts as a "continuation of the previous row" when
+    the CSV actually HAS a title/id/desc column and that column is blank on
+    this row. If the CSV has no such column at all, every row is its own
+    test case - previously, CSVs whose only identifying columns were
+    "Test Case ID"/"Test Case Description" (not recognized as a title) fell
+    through to "blank title -> continuation", silently merging every row in
+    the file into a single test case.
+    """
+    reader = csv.DictReader(io.StringIO(raw_text))
+    if not reader.fieldnames:
+        return []
+
+    header_map = {}
+    for h in reader.fieldnames:
+        norm = _normalize_header(h)
+        if norm in _TITLE_COLS:
+            header_map['title'] = h
+        elif norm in _STEPS_COLS:
+            header_map['steps'] = h
+        elif norm in _EXPECTED_COLS:
+            header_map['expected'] = h
+        if norm in _ID_COLS:
+            header_map['id'] = h
+        if norm in _DESC_COLS:
+            header_map['desc'] = h
+
+    if 'steps' not in header_map:
+        raise ValueError("Could not find a Steps/Description column in the CSV.")
+
+    has_title_col = 'title' in header_map
+    has_id_or_desc = 'id' in header_map or 'desc' in header_map
+    # Do we have ANY column that can identify "this row starts a new test
+    # case"? If not, there's no such thing as a continuation row here.
+    has_identifying_col = has_title_col or has_id_or_desc
+
+    test_cases: List[dict] = []
+    current = None
+    for row in reader:
+        raw_title = (row.get(header_map.get('title', ''), '') or '').strip()
+        id_val = (row.get(header_map.get('id', ''), '') or '').strip()
+        desc_val = (row.get(header_map.get('desc', ''), '') or '').strip()
+        steps_val = (row.get(header_map['steps'], '') or '').strip()
+        expected_val = (row.get(header_map.get('expected', ''), '') or '').strip()
+
+        if not steps_val and not raw_title and not id_val and not desc_val:
+            continue
+
+        if has_title_col:
+            title_val = raw_title
+        elif has_id_or_desc:
+            # Combine whichever of ID/Description are present into a readable title.
+            title_val = " - ".join(v for v in (id_val, desc_val) if v)
+        else:
+            title_val = ""
+
+        is_continuation_row = has_identifying_col and not title_val and current is not None
+
+        if is_continuation_row:
+            if steps_val:
+                current["steps_text"] += ("\n" + steps_val)
+            if expected_val and not current["expected_result"]:
+                current["expected_result"] = expected_val
+        else:
+            current = {"title": title_val or "Untitled Test Case", "steps_text": steps_val, "expected_result": expected_val}
+            test_cases.append(current)
+
+    return test_cases
 
 
 def _is_image(file: UploadFile) -> bool:
@@ -180,6 +325,7 @@ async def generate_tests_from_document(
             for b, mt in image_list
         ] if image_list else None
 
+        _pass1_start = time.time()
         blueprints = await discover_test_blueprints(
             content=content,
             image_parts=image_parts,
@@ -188,6 +334,7 @@ async def generate_tests_from_document(
             app_id=str(app_id) if app_id else None,
             batch_label=batch_label
         )
+        pass1_time_sec = time.time() - _pass1_start
 
         if not blueprints or not isinstance(blueprints, list):
             raise ValueError("Pass 1 discovery failed.")
@@ -250,12 +397,16 @@ async def generate_tests_from_document(
                 tc_result["test_data_values"] = this_case_test_data
                 return tc_result
 
+        _pass2_start = time.time()
         test_cases = await asyncio.gather(*[worker_wrapper(bp, i) for i, bp in enumerate(blueprints)])
+        pass2_time_sec = time.time() - _pass2_start
 
     except _GenerationAborted:
         raise HTTPException(status_code=499, detail="Generation cancelled by client.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation error: {str(e)}")
+
+    generation_trace = _build_generation_trace(batch_label, pass1_time_sec, pass2_time_sec)
 
     return GenerateTestResponse(
         run_id=None,
@@ -263,6 +414,92 @@ async def generate_tests_from_document(
         total=len(test_cases),
         context_used=(context is not None or knowledge_context != ""),
         source=source,
+        test_cases=test_cases,
+        generation_trace=generation_trace
+    )
+
+
+@router.post("/import-csv", response_model=GenerateTestResponse)
+async def import_manual_test_cases_csv(
+    request: Request,
+    file: UploadFile = File(...),
+    app_id: Optional[str] = Form(None),
+    current_user=Depends(get_current_user)
+):
+    """
+    Imports manually-written test cases from a CSV export. Steps that already
+    read as atomic/literal actions are kept verbatim at zero AI cost; only
+    genuinely high-level/descriptive steps get an AI rewrite pass — see
+    normalize_manual_test_case / _looks_already_executable in llm_service.py.
+    Returns the same shape as /tests/generate.
+    """
+    try:
+        check_generation(current_user.id)
+    except RateLimitExceeded as e:
+        raise HTTPException(
+            status_code=429,
+            detail=str(e),
+            headers={"Retry-After": str(e.retry_after)},
+        )
+
+    if not file.filename or not file.filename.lower().endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Please upload a .csv file.")
+
+    raw_bytes = await file.read()
+    try:
+        raw_text = raw_bytes.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        raw_text = raw_bytes.decode('latin-1')
+
+    try:
+        parsed_rows = _parse_manual_csv(raw_text)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not parsed_rows:
+        raise HTTPException(status_code=400, detail="No test cases found in the uploaded CSV.")
+
+    app_base_url = None
+    if app_id:
+        try:
+            app_record = await db.application.find_unique(where={"id": str(app_id)})
+            if app_record and app_record.url:
+                app_base_url = app_record.url.rstrip("/")
+        except Exception as e:
+            print(f"[import-csv] Could not fetch app URL: {e}")
+
+    import time as _time
+    batch_label = f"{file.filename} · {_time.strftime('%H:%M:%S')}"
+
+    semaphore = asyncio.Semaphore(4)
+
+    async def worker(row: dict) -> dict:
+        async with semaphore:
+            await asyncio.sleep(0.15)
+            tc_result = await normalize_manual_test_case(
+                title=row["title"],
+                raw_steps_text=row["steps_text"],
+                expected_result=row.get("expected_result") or None,
+                app_id=str(app_id) if app_id else None,
+                batch_label=batch_label,
+                base_url=app_base_url,
+            )
+            tc_result["test_data_source_type"] = None
+            tc_result["test_data_source_id"] = None
+            tc_result["test_data_values"] = None
+            return tc_result
+
+    if await request.is_disconnected():
+        raise HTTPException(status_code=499, detail="Import cancelled by client.")
+
+    test_cases = await asyncio.gather(*[worker(row) for row in parsed_rows])
+
+    return GenerateTestResponse(
+        run_id=None,
+        filename=file.filename,
+        total=len(test_cases),
+        context_used=False,
+        source="csv-import",
         test_cases=test_cases
     )
 

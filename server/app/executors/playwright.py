@@ -119,6 +119,9 @@ Error: "{error_msg}"
 3. Always try to heal first. Only skip if the element truly cannot be found anywhere in the DOM.
 4. For "heal" on an input field: look for the exact input element in the DOM (by id, name, placeholder, type, or aria-label).
    Prefer CSS selectors like input[name="username"] or input[type="password"] — these are the most reliable.
+5. If the original intent was to select an option from a dropdown/select list, your healed_selector must
+   target the <select> element itself (never the <option>) — the caller always calls select_option(label=...)
+   on whatever selector you provide for this case, so pointing at an <option> will not work.
 
 Respond ONLY with valid JSON (no markdown, no explanation outside the JSON):
 {{
@@ -432,6 +435,106 @@ async def _execute_step(page, step: str, app_id: str = None, batch_label: str = 
                     "status": "passed", 
                     "detail": f"Typed '{text}'" if not self_healed else f"[SELF-HEALED] Typed '{text}' via: {healer_notes}"
                 }
+
+        # Dedicated native <select> dropdown handler — must run BEFORE the generic
+        # click branch below. A step like "Select 'X' from the ... dropdown" was
+        # previously falling through to the click-matching logic used for buttons
+        # and links, which cannot work for a native HTML <select>: its <option>
+        # elements aren't visible/actionable via ordinary DOM interaction the way a
+        # button is while the dropdown is closed. That mismatch meant both the
+        # primary attempt AND the self-heal retry (which also just called .click())
+        # failed the same way — the healer wasn't skipped, it just tried the wrong
+        # kind of interaction and hung on Playwright's default actionability timeout
+        # before giving up, which is why failures here surfaced as a raw ~45s
+        # timeout with no [SELF-HEALED] badge instead of a clean success or failure.
+        if "dropdown" in s or "select box" in s or "select-box" in s:
+            text_match = re.search(r"['\"](.+?)['\"]", step)
+            option_label = text_match.group(1) if text_match else None
+
+            if option_label:
+                # Descriptive words before "dropdown" (e.g. "product sort dropdown")
+                # narrow down which <select> on the page is meant, when there's more
+                # than one. Falls back to the first visible <select> if no hint
+                # matches — fine for the common case of a single relevant dropdown.
+                hint_match = re.search(r"(?:the\s+)?([a-z0-9\s]+?)\s+(?:dropdown|select box|select-box)", s)
+                hint_words = [w for w in hint_match.group(1).strip().split() if len(w) > 2] if hint_match else []
+
+                select_candidates = []
+
+                # Most reliable strategy first: scan every <select> on the page and
+                # find the one whose own <option> list actually contains the target
+                # text. This is deterministic — no guessing from surrounding words —
+                # and correctly handles pages with multiple dropdowns without ever
+                # needing to call the AI healer at all for the common case.
+                try:
+                    all_selects = page.locator("select")
+                    select_count = await all_selects.count()
+                    for idx in range(select_count):
+                        candidate = all_selects.nth(idx)
+                        try:
+                            options_text = await candidate.locator("option").all_inner_texts()
+                            if any(option_label.strip().lower() == opt.strip().lower() for opt in options_text):
+                                select_candidates.append(candidate)
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+                for w in hint_words:
+                    w_esc = re.escape(w)
+                    select_candidates.append(
+                        page.locator(f"select[class*='{w_esc}'], select[id*='{w_esc}'], select[name*='{w_esc}'], select[aria-label*='{w_esc}' i]").first
+                    )
+                select_candidates.append(page.locator("select:visible").first)
+                select_candidates.append(page.locator("select").first)
+
+                success = False
+                for sel_loc in select_candidates:
+                    try:
+                        await sel_loc.wait_for(state="visible", timeout=1500)
+                        await sel_loc.select_option(label=option_label)
+                        success = True
+                        break
+                    except Exception:
+                        continue
+
+                if success:
+                    return {"status": "passed", "detail": f"Selected '{option_label}' from dropdown"}
+
+                # Self-heal: ask Gemini to locate the right <select> element. Always
+                # retries with select_option() below, never .click() — we know
+                # structurally this must be a native-select interaction regardless
+                # of what generic action type the healer's response schema implies.
+                try:
+                    dom_tree = await page.content()
+                except Exception:
+                    dom_tree = ""
+                try:
+                    _heal_screenshot_select = await page.screenshot(type="png")
+                except Exception:
+                    _heal_screenshot_select = None
+                healing_plan = await _call_gemini_healer(
+                    step, [option_label], dom_tree,
+                    "Could not locate the target <select> element for this dropdown option",
+                    app_id=app_id, batch_label=batch_label,
+                    screenshot_bytes=_heal_screenshot_select
+                )
+                action = healing_plan.get("action", "heal")
+
+                if action == "skip":
+                    return {"status": "passed", "detail": f"[SELF-HEALED] Gemini skipped unreachable dropdown selection: {healing_plan.get('explanation', '')}"}
+
+                if "healed_selector" in healing_plan:
+                    try:
+                        h_sel = healing_plan["healed_selector"]
+                        target_loc = page.locator(h_sel).first
+                        await target_loc.wait_for(state="visible", timeout=3000)
+                        await target_loc.select_option(label=option_label)
+                        return {"status": "passed", "detail": f"[SELF-HEALED] Selected '{option_label}' via: {healing_plan.get('explanation', '')}"}
+                    except Exception as retry_err:
+                        return {"status": "failed", "detail": f"Dropdown selection failed even after self-healing: {str(retry_err)}"}
+
+                return {"status": "failed", "detail": f"Could not find dropdown for '{option_label}': {healing_plan.get('explanation', 'no viable selector found')}"}
 
         if any(w in s for w in ["click", "press", "tap", "select", "choose", "submit"]):
             # Dedicated "Press Enter" / "Press the Enter key" handler — common after autocomplete
@@ -912,5 +1015,368 @@ async def run_test_case(
         record_video, app_id, batch_label, cancel_event
     )
     fn = functools.partial(_run_in_new_loop, coro, cancel_event)
+    result = await loop.run_in_executor(None, fn)
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Application discovery / scouting — powers the Coverage Index tab.
+#
+# Unlike test execution, this never acts on the app (no clicks, no form
+# submits) — it only crawls same-origin pages and reads the DOM to inventory
+# interactive elements. Elements are then clustered into WORKFLOWS rather than
+# counted individually, so e.g. 200 "Add to Cart" buttons across 200 product
+# pages collapse into ONE workflow instead of exploding into a permutation.
+#
+# Clustering key = (normalized route pattern, intent). Route normalization
+# replaces path segments that look like ids (numeric, uuid, long hash-like
+# tokens) with ":id", so /product/104 and /product/207 both become
+# /product/:id — same page *type*, so their "Add to Cart" buttons cluster
+# together. Two different page types that happen to both have a "Submit"
+# button (e.g. /login and /contact) do NOT cluster, since their route
+# patterns differ.
+# ─────────────────────────────────────────────────────────────────────────────
+
+import time as _time
+from urllib.parse import urlparse, urljoin
+
+# Ordered intent keyword map — first match wins, so more specific intents
+# (e.g. "remove_from_cart") are listed before generic ones ("form_submit").
+_INTENT_KEYWORDS = [
+    ("add_to_cart",        ["add to cart", "add to bag", "add to basket", "buy now"]),
+    ("remove_from_cart",   ["remove from cart", "remove item", "delete item"]),
+    ("quantity_stepper",   ["increase quantity", "decrease quantity", "increment", "decrement", "qty", "quantity"]),
+    ("checkout",           ["checkout", "place order", "proceed to payment", "pay now"]),
+    ("login",              ["log in", "login", "sign in"]),
+    ("signup",             ["sign up", "register", "create account"]),
+    ("logout",             ["log out", "logout", "sign out"]),
+    ("search",             ["search"]),
+    ("filter_sort",        ["filter", "sort by", "sort"]),
+    ("pagination",         ["next page", "previous page", "load more", "page "]),
+    ("upload",             ["upload", "choose file", "attach file"]),
+    ("download_export",    ["download", "export"]),
+    ("toggle",             ["toggle", "enable", "disable", "switch on", "switch off"]),
+    ("delete",             ["delete", "remove"]),
+    ("edit_update",        ["edit", "update"]),
+    ("form_submit",        ["submit", "save", "continue", "next", "confirm", "apply"]),
+]
+
+# Variant count per intent — this is the "how many test cases does this
+# workflow reasonably need" heuristic, capped deliberately low so estimates
+# don't balloon. 1 = happy path only. 2 = + boundary. 3 = + boundary + negative.
+_INTENT_VARIANTS = {
+    "login": 3, "signup": 3, "checkout": 3, "delete": 3, "form_submit": 3, "upload": 3,
+    "add_to_cart": 2, "remove_from_cart": 2, "quantity_stepper": 2, "search": 2,
+    "filter_sort": 2, "toggle": 2, "edit_update": 2,
+    "logout": 1, "nav_link": 1, "pagination": 1, "download_export": 1, "generic_click": 1,
+}
+
+
+def _classify_intent(label: str) -> str:
+    text = (label or "").strip().lower()
+    for intent, keywords in _INTENT_KEYWORDS:
+        if any(k in text for k in keywords):
+            return intent
+    return None  # caller decides fallback (nav_link vs generic_click) by element tag
+
+
+def _normalize_route(path: str) -> str:
+    """Collapse ids in a path so /product/104 and /product/207 cluster as one."""
+    segments = [s for s in path.split("/") if s]
+    normalized = []
+    for seg in segments:
+        if re.fullmatch(r"\d+", seg):
+            normalized.append(":id")
+        elif re.fullmatch(r"[0-9a-fA-F-]{8,}", seg) and any(c.isdigit() for c in seg):
+            normalized.append(":id")
+        elif len(seg) > 24 and seg.isalnum():
+            normalized.append(":id")
+        else:
+            normalized.append(seg)
+    return "/" + "/".join(normalized) if normalized else "/"
+
+
+async def _extract_page_elements(page, page_url: str) -> list:
+    """Pull interactive elements off the current page with a role/label guess."""
+    try:
+        raw = await page.evaluate("""
+() => {
+  const out = [];
+  const pick = (el) => {
+    const label = (el.getAttribute('aria-label') || el.innerText || el.getAttribute('placeholder') ||
+                   el.getAttribute('title') || el.value || '').trim().slice(0, 80);
+    return label;
+  };
+  const selectors = [
+    'button', '[role="button"]', 'input[type="submit"]', 'input[type="button"]',
+    'a[href]', 'input', 'select', 'textarea', 'form'
+  ];
+  const seen = new Set();
+  selectors.forEach(sel => {
+    document.querySelectorAll(sel).forEach(el => {
+      if (seen.has(el)) return;
+      seen.add(el);
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) return; // skip hidden elements
+      out.push({
+        tag: el.tagName.toLowerCase(),
+        label: pick(el),
+        href: el.tagName.toLowerCase() === 'a' ? el.getAttribute('href') : null
+      });
+    });
+  });
+  return out;
+}
+""")
+    except Exception as e:
+        print(f"[Scout] element extraction failed on {page_url}: {e}")
+        return []
+    return raw or []
+
+
+def _process_page_elements(elements: list, route_pattern: str, url: str, clusters: dict,
+                            origin_netloc: str, queue: list, queued_urls: set, visited_routes: set) -> None:
+    """Shared clustering + link-enqueue logic, used for both the auth bootstrap
+    page(s) and every page visited during the main BFS crawl."""
+    for el in elements:
+        tag = el.get("tag")
+        label = el.get("label") or ""
+        href = el.get("href")
+
+        intent = _classify_intent(label)
+        if intent is None:
+            if tag == "a":
+                intent = "nav_link"
+            elif tag in ("button", "input"):
+                intent = "generic_click"
+            else:
+                continue  # bare inputs/selects with no actionable label aren't a workflow on their own
+
+        cluster_key = (route_pattern, intent)
+        if cluster_key not in clusters:
+            clusters[cluster_key] = {
+                "intent": intent,
+                "routePattern": route_pattern,
+                "label": label or intent.replace("_", " ").title(),
+                "instanceCount": 0,
+                "examplePageUrl": url,
+            }
+        clusters[cluster_key]["instanceCount"] += 1
+
+        # Queue same-origin internal links for further crawling — only if we
+        # haven't already got a page queued/visited for that route pattern,
+        # to keep the crawl from wandering into hundreds of near-identical
+        # listing pages.
+        if tag == "a" and href:
+            abs_url = urljoin(url, href)
+            abs_parsed = urlparse(abs_url)
+            if abs_parsed.netloc == origin_netloc and abs_url not in queued_urls:
+                candidate_route = _normalize_route(abs_parsed.path)
+                if candidate_route not in visited_routes:
+                    queue.append(abs_url)
+                    queued_urls.add(abs_url)
+
+
+_PASSWORD_KEY_HINTS = ("pass", "pwd")
+_USERNAME_KEY_HINTS = ("user", "email", "login", "id")
+
+
+def _resolve_login_credentials(login_fields: dict) -> tuple:
+    """Best-effort match of a generic {field_name: value} Test Data dict onto
+    (username_value, password_value), by key-name heuristic first, falling
+    back to positional guessing for simple two-field templates."""
+    if not login_fields:
+        return None, None
+    username_val, password_val = None, None
+    for k, v in login_fields.items():
+        kl = str(k).lower()
+        if any(t in kl for t in _PASSWORD_KEY_HINTS):
+            password_val = v
+        elif any(t in kl for t in _USERNAME_KEY_HINTS) and username_val is None:
+            username_val = v
+    if password_val is not None and username_val is None:
+        for k, v in login_fields.items():
+            if v != password_val:
+                username_val = v
+                break
+    if username_val is not None and password_val is None:
+        for k, v in login_fields.items():
+            if v != username_val:
+                password_val = v
+                break
+    return username_val, password_val
+
+
+async def _attempt_login(page, login_fields: dict) -> bool:
+    """Fills and submits a detected login form using this app's existing Test
+    Data. Returns True only if the password field is gone after submit (a
+    reasonable proxy for 'left the login page')."""
+    username_val, password_val = _resolve_login_credentials(login_fields)
+    if not password_val:
+        return False  # nothing password-shaped to fill — not confident enough to try
+    try:
+        pw_locator = page.locator('input[type="password"]').first
+        if await pw_locator.count() == 0:
+            return False
+        user_locator = page.locator('input[type="text"], input[type="email"], input:not([type])').first
+        if username_val and await user_locator.count() > 0:
+            await user_locator.fill(str(username_val))
+        await pw_locator.fill(str(password_val))
+
+        submit_locator = page.locator('button[type="submit"], input[type="submit"]').first
+        if await submit_locator.count() > 0:
+            await submit_locator.click()
+        else:
+            await pw_locator.press("Enter")
+
+        try:
+            await page.wait_for_load_state("networkidle", timeout=8000)
+        except Exception:
+            pass
+
+        return (await page.locator('input[type="password"]').count()) == 0
+    except Exception as e:
+        print(f"[Scout] login attempt failed: {e}")
+        return False
+
+
+async def _scout_application(base_url: str, page_limit: int, login_fields: dict = None) -> dict:
+    # pyrefly: ignore [missing-import]
+    from playwright.async_api import async_playwright
+
+    start = _time.time()
+    origin = urlparse(base_url)
+    origin_netloc = origin.netloc
+
+    visited_routes: set = set()      # normalized route patterns already crawled
+    queue: list = []
+    queued_urls: set = set()
+    pages_scanned = 0
+    total_elements = 0
+    auth_attempted = False
+    auth_succeeded = False
+
+    # cluster_key -> { intent, routePattern, label, instanceCount, examplePageUrl }
+    clusters: dict = {}
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-web-security"])
+        context = await browser.new_context(viewport={"width": 1280, "height": 720})
+        page = await context.new_page()
+
+        try:
+            # ── Auth bootstrap ────────────────────────────────────────────
+            # Login-walled apps (e.g. SwagLabs) have nothing to crawl to
+            # beyond the login form itself — the Login button is a form
+            # submit, not an <a href>, so the BFS below would never see a
+            # second page. If this app has Test Data configured, try filling
+            # and submitting the login form BEFORE starting the normal crawl,
+            # using the same browser context so the session cookie carries
+            # through into every subsequent page.
+            if login_fields:
+                try:
+                    await page.goto(base_url, timeout=15000, wait_until="domcontentloaded")
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=5000)
+                    except Exception:
+                        pass
+
+                    if await page.locator('input[type="password"]').count() > 0:
+                        auth_attempted = True
+                        login_route = _normalize_route(urlparse(base_url).path)
+                        elements = await _extract_page_elements(page, base_url)
+                        total_elements += len(elements)
+                        _process_page_elements(elements, login_route, base_url, clusters,
+                                                origin_netloc, queue, queued_urls, visited_routes)
+                        visited_routes.add(login_route)
+                        pages_scanned += 1
+
+                        auth_succeeded = await _attempt_login(page, login_fields)
+
+                        if auth_succeeded and pages_scanned < page_limit:
+                            # Scan the authenticated landing page too — this is
+                            # where the real app inventory (product lists, nav,
+                            # etc.) actually lives, and it seeds the BFS queue
+                            # below with real internal links to keep crawling.
+                            post_login_url = page.url
+                            post_login_route = _normalize_route(urlparse(post_login_url).path)
+                            if post_login_route not in visited_routes:
+                                elements2 = await _extract_page_elements(page, post_login_url)
+                                total_elements += len(elements2)
+                                _process_page_elements(elements2, post_login_route, post_login_url, clusters,
+                                                        origin_netloc, queue, queued_urls, visited_routes)
+                                visited_routes.add(post_login_route)
+                                pages_scanned += 1
+                except Exception as e:
+                    print(f"[Scout] auth bootstrap failed: {e}")
+
+            # If nothing got queued during bootstrap (no login form found, no
+            # credentials given, or login failed), fall back to the normal
+            # unauthenticated crawl starting at base_url — identical to
+            # pre-auth behavior.
+            if not queue and base_url not in queued_urls and not auth_attempted:
+                queue = [base_url]
+                queued_urls = {base_url}
+
+            # ── Main BFS crawl ────────────────────────────────────────────
+            while queue and pages_scanned < page_limit:
+                url = queue.pop(0)
+                parsed = urlparse(url)
+                route_pattern = _normalize_route(parsed.path)
+
+                # Skip if we've already scanned this *type* of page (e.g. another
+                # /product/:id) — one representative page per route pattern is
+                # enough to discover that workflow's elements.
+                if route_pattern in visited_routes:
+                    continue
+
+                try:
+                    await page.goto(url, timeout=15000, wait_until="domcontentloaded")
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=5000)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    print(f"[Scout] failed to load {url}: {e}")
+                    continue
+
+                visited_routes.add(route_pattern)
+                pages_scanned += 1
+
+                elements = await _extract_page_elements(page, url)
+                total_elements += len(elements)
+                _process_page_elements(elements, route_pattern, url, clusters,
+                                        origin_netloc, queue, queued_urls, visited_routes)
+        finally:
+            await context.close()
+            await browser.close()
+
+    workflows = []
+    estimated_total = 0
+    for cluster in clusters.values():
+        variants = _INTENT_VARIANTS.get(cluster["intent"], 1)
+        cluster["variants"] = variants
+        estimated_total += variants
+        workflows.append(cluster)
+
+    return {
+        "status": "ready",
+        "pagesScanned": pages_scanned,
+        "totalElements": total_elements,
+        "workflows": workflows,
+        "estimatedTestCases": estimated_total,
+        "scoutDurationSec": round(_time.time() - start, 1),
+        "authAttempted": auth_attempted,
+        "authSucceeded": auth_succeeded,
+    }
+
+
+async def scout_application(base_url: str, page_limit: int = 15, login_fields: dict = None) -> dict:
+    """Public entrypoint — runs the discovery crawl in its own event loop thread,
+    same pattern as run_test_case, so it plays nicely with FastAPI's loop."""
+    import functools
+    loop = asyncio.get_event_loop()
+    coro = _scout_application(base_url, page_limit, login_fields)
+    fn = functools.partial(_run_in_new_loop, coro, None)
     result = await loop.run_in_executor(None, fn)
     return result

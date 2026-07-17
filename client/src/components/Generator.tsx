@@ -2,7 +2,8 @@ import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import {
   Ticket, ClipboardList, FileUp, Image, Sparkles, X,
-  ChevronDown, ChevronRight, FileText, Trash2, Edit2, Terminal, CheckSquare, Square, Copy, Download, Activity, Cpu, Layers
+  ChevronDown, ChevronRight, FileText, Trash2, Edit2, Terminal, CheckSquare, Square, Copy, Download, Activity, Cpu, Layers,
+  RefreshCw, Settings2, MousePointerClick, AlertTriangle
 } from 'lucide-react';
 import { apiService } from '../services/api';
 
@@ -19,6 +20,135 @@ interface GeneratorLog {
   type: 'info' | 'success' | 'warning' | 'step';
   message: string;
 }
+
+// Renders the Coverage Index tab: real scouted-workflow data compared against
+// how many test cases actually exist for this app, plus a page-limit config
+// field and a manual re-scan trigger. Kept as its own component since it has
+// its own loading/error/empty states independent of the generation flow.
+const CoverageIndexPanel: React.FC<{
+  loading: boolean;
+  error: string | null;
+  profile: any;
+  pageLimitInput: number;
+  setPageLimitInput: (n: number) => void;
+  onRescan: () => void;
+}> = ({ loading, error, profile, pageLimitInput, setPageLimitInput, onRescan }) => {
+
+  const intentLabels: Record<string, string> = {
+    add_to_cart: 'Add to Cart', remove_from_cart: 'Remove from Cart', quantity_stepper: 'Quantity Stepper',
+    checkout: 'Checkout', login: 'Login', signup: 'Sign Up', logout: 'Logout', search: 'Search',
+    filter_sort: 'Filter / Sort', pagination: 'Pagination', upload: 'Upload', download_export: 'Download / Export',
+    toggle: 'Toggle', delete: 'Delete', edit_update: 'Edit / Update', form_submit: 'Form Submit',
+    nav_link: 'Navigation Link', generic_click: 'Generic Action',
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '0.85rem 1rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <Settings2 size={14} style={{ color: '#4f46e5' }} />
+          <span style={{ fontSize: '0.78rem', color: '#374151', fontWeight: 600 }}>Crawl page limit</span>
+          <input
+            type="number"
+            min={1}
+            max={100}
+            value={pageLimitInput}
+            onChange={(e) => setPageLimitInput(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
+            style={{ width: '64px', padding: '4px 6px', border: '1px solid #d1d5db', borderRadius: '6px', fontSize: '0.8rem' }}
+          />
+        </div>
+        <button
+          type="button"
+          onClick={onRescan}
+          disabled={loading}
+          style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', background: '#eef2ff', border: '1px solid #c7d2fe', color: '#4338ca', fontWeight: 700, fontSize: '0.78rem', borderRadius: '6px', padding: '0.4rem 0.75rem', cursor: loading ? 'default' : 'pointer', opacity: loading ? 0.6 : 1 }}
+        >
+          <RefreshCw size={13} className={loading ? 'spin' : ''} /> {loading ? 'Scanning…' : 'Re-scan Application'}
+        </button>
+      </div>
+
+      {loading && !profile && (
+        <div style={{ padding: '2rem', textAlign: 'center', color: '#64748b', fontSize: '0.85rem' }}>
+          Scouting the live application — crawling pages and classifying interactive elements…
+        </div>
+      )}
+
+      {error && (
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', background: '#fef2f2', border: '1px solid #fecaca', color: '#b91c1c', padding: '0.85rem 1rem', borderRadius: '10px', fontSize: '0.8rem' }}>
+          <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: '1px' }} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {profile && !loading && (
+        <>
+          {profile.authAttempted && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.6rem 0.85rem', borderRadius: '8px', fontSize: '0.78rem',
+              background: profile.authSucceeded ? '#f0fdf4' : '#fffbeb',
+              border: `1px solid ${profile.authSucceeded ? '#bbf7d0' : '#fde68a'}`,
+              color: profile.authSucceeded ? '#15803d' : '#92400e',
+            }}>
+              {profile.authSucceeded
+                ? '✓ Detected a login wall and signed in with this app\'s Test Data before crawling — results reflect the authenticated app.'
+                : '⚠ Detected a login wall but could not sign in (no matching Test Data, or the credentials didn\'t work) — results only reflect the login page itself. Add a Test Data Template/Condition for this app and re-scan.'}
+            </div>
+          )}
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem' }}>
+            <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '1rem' }}>
+              <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Coverage Index</span>
+              <div style={{ fontSize: '1.75rem', fontWeight: 800, color: '#0f172a', marginTop: '2px' }}>{profile.coveragePercent}%</div>
+              <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: '2px' }}>{profile.generatedTestCases} of ~{profile.estimatedTestCases} estimated workflows covered</div>
+            </div>
+            <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '1rem' }}>
+              <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Pages Scanned</span>
+              <div style={{ fontSize: '1.75rem', fontWeight: 800, color: '#0f172a', marginTop: '2px' }}>{profile.pagesScanned}</div>
+              <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: '2px' }}>{profile.totalElements} interactive elements found</div>
+            </div>
+            <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '1rem' }}>
+              <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Safe to Generate</span>
+              <div style={{ fontSize: '1.75rem', fontWeight: 800, color: '#0f172a', marginTop: '2px' }}>+{profile.safeToGenerateMore}</div>
+              <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: '2px' }}>more before redundancy risk</div>
+            </div>
+          </div>
+
+          <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '1rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
+              <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#64748b' }}>Generated vs. Estimated Workflows</span>
+              <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#374151' }}>{profile.generatedTestCases} / {profile.estimatedTestCases}</span>
+            </div>
+            <div style={{ width: '100%', height: '10px', background: '#e2e8f0', borderRadius: '999px', overflow: 'hidden' }}>
+              <div style={{ width: `${Math.min(100, profile.coveragePercent)}%`, height: '100%', background: profile.coveragePercent >= 100 ? '#f59e0b' : '#4f46e5', borderRadius: '999px', transition: 'width 0.3s ease' }} />
+            </div>
+          </div>
+
+          <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '1rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.75rem' }}>
+              <MousePointerClick size={14} style={{ color: '#4f46e5' }} />
+              <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Discovered Workflows ({profile.workflows.length})</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', maxHeight: '220px', overflowY: 'auto' }}>
+              {profile.workflows.length === 0 && (
+                <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>No actionable workflows discovered — check the crawl page limit or the app URL.</span>
+              )}
+              {profile.workflows.map((w: any, i: number) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.4rem 0.6rem', background: '#ffffff', border: '1px solid #edf2f7', borderRadius: '6px' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column' }}>
+                    <span style={{ fontSize: '0.78rem', fontWeight: 600, color: '#1e293b' }}>{intentLabels[w.intent] || w.intent}</span>
+                    <span style={{ fontSize: '0.68rem', color: '#94a3b8', fontFamily: 'monospace' }}>{w.routePattern} · {w.instanceCount} instance(s) clustered</span>
+                  </div>
+                  <span style={{ fontSize: '0.7rem', fontWeight: 700, color: '#4338ca', background: '#eef2ff', padding: '2px 8px', borderRadius: '4px' }}>{w.variants} variant(s)</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
 
 export const Generator: React.FC = () => {
   const {
@@ -84,6 +214,17 @@ export const Generator: React.FC = () => {
     })();
   }, [activeAppId]);
 
+  // Reset staged inputs (uploaded files/screenshots + pasted text) whenever the
+  // active app changes. Without this, switching apps mid-session left the
+  // previous app's stagedFiles/sourceInput sitting in state — since the only
+  // other place these get cleared is the post-generation success handler, not
+  // an app switch — so the next generate call for the NEW app silently bundled
+  // in the OLD app's screenshots/text, producing test cases mixing both apps.
+  useEffect(() => {
+    setStagedFiles([]);
+    setSourceInput('');
+  }, [activeAppId]);
+
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationElapsedSec, setGenerationElapsedSec] = useState<number | null>(null);
   const [showModal, setShowModal] = useState(false);
@@ -91,6 +232,16 @@ export const Generator: React.FC = () => {
   const [modalLogs, setModalLogs] = useState<GeneratorLog[]>([]);
   const [activeBatchMetrics, setActiveBatchMetrics] = useState<any>(null);
   const [activeBatchTitle, setActiveBatchTitle] = useState<string>('');
+
+  // Coverage Index is now a standalone feature (its own button + modal in the
+  // studio header), separate from the generation Execution Trace modal, since
+  // it's per-app data rather than per-batch.
+  const [showCoverageModal, setShowCoverageModal] = useState(false);
+  const [scoutProfile, setScoutProfile] = useState<any>(null);
+  const [scoutLoading, setScoutLoading] = useState(false);
+  const [scoutError, setScoutError] = useState<string | null>(null);
+  const [scoutPageLimitInput, setScoutPageLimitInput] = useState<number>(15);
+  const scoutCacheRef = useRef<Record<string, any>>({});
 
   const [activeExportDropdownId, setActiveExportDropdownId] = useState<string | null>(null);
 
@@ -163,6 +314,50 @@ export const Generator: React.FC = () => {
     setShowModal(true);
   };
 
+  const fetchScoutProfile = async (force = false) => {
+    if (!activeAppId) return;
+    if (!force && scoutCacheRef.current[activeAppId]) {
+      setScoutProfile(scoutCacheRef.current[activeAppId]);
+      return;
+    }
+    setScoutLoading(true);
+    setScoutError(null);
+    try {
+      const profile = await apiService.getScoutProfile(activeAppId);
+      scoutCacheRef.current[activeAppId] = profile;
+      setScoutProfile(profile);
+      setScoutPageLimitInput(profile.pageLimit ?? 15);
+    } catch (err: any) {
+      setScoutError(err.message || 'Failed to scout the application.');
+    } finally {
+      setScoutLoading(false);
+    }
+  };
+
+  const handleRescanApplication = async () => {
+    if (!activeAppId) return;
+    setScoutLoading(true);
+    setScoutError(null);
+    try {
+      const profile = await apiService.refreshScoutProfile(activeAppId, scoutPageLimitInput);
+      scoutCacheRef.current[activeAppId] = profile;
+      setScoutProfile(profile);
+    } catch (err: any) {
+      setScoutError(err.message || 'Re-scan failed.');
+    } finally {
+      setScoutLoading(false);
+    }
+  };
+
+  // Lazy-load coverage data only when the standalone Coverage Index modal is
+  // actually opened, and only once per app (cached in scoutCacheRef) unless
+  // the user hits Re-scan.
+  useEffect(() => {
+    if (showCoverageModal && activeAppId) {
+      fetchScoutProfile(false);
+    }
+  }, [showCoverageModal, activeAppId]);
+
   // Appends a single timestamped line to the generation console modal.
   // Centralizes the pattern already used inline elsewhere in this file
   // (see the catch block in triggerGeneration) so callers like
@@ -201,9 +396,14 @@ export const Generator: React.FC = () => {
     // doesn't briefly flash an old duration before its own timer lands.
     setGenerationElapsedSec(null);
 
+    // Only two things are actually knowable before the request goes out —
+    // that generation started, and against which app. Everything after this
+    // (which pass ran, how many tokens, whether the top-up fired) gets pushed
+    // in AFTER the response arrives, built from the real generation_trace the
+    // backend returns — not guessed at up front.
     const initialLogs: GeneratorLog[] = [
-      { timestamp: new Date().toTimeString().split(' ')[0], type: 'info', message: 'Spawning OmniTestAI DeepCompiling agent workspace environment stack...' },
-      { timestamp: new Date().toTimeString().split(' ')[0], type: 'info', message: `Target active project node maps locked onto node ID schema: "${activeApp?.name || 'Apex Client Core'}"` }
+      { timestamp: new Date().toTimeString().split(' ')[0], type: 'info', message: 'Generation request sent to backend.' },
+      { timestamp: new Date().toTimeString().split(' ')[0], type: 'info', message: `Target application: "${activeApp?.name || 'Unknown'}"` }
     ];
     setModalLogs(initialLogs);
 
@@ -226,16 +426,10 @@ export const Generator: React.FC = () => {
         });
       }
 
-      // ⚡ PRE-PUSH AN ACTIVE GENERATION TRACE MESSAGE IMMEDIATELY INTO CONSOLE VIEWS
       initialLogs.push({
         timestamp: new Date().toTimeString().split(' ')[0],
         type: 'step',
-        message: 'Streaming raw source attachments and binary rulesets into grounding layer arrays...'
-      });
-      initialLogs.push({
-        timestamp: new Date().toTimeString().split(' ')[0],
-        type: 'step',
-        message: 'Generation in progress... Throttled Two-Pass worker pool executing against Gemini 3 Flash API.'
+        message: 'Pass 1/2 in progress — blueprint discovery and step expansion running against Gemini.'
       });
       setModalLogs([...initialLogs]);
 
@@ -277,6 +471,7 @@ export const Generator: React.FC = () => {
           priority: tc.type === 'edge_case' ? 'medium' : 'high',
           section: effectiveBatchLabel,
           source: 'ai',
+          type: tc.type || 'positive',
           steps: parsedSteps.map((stepStr: string, idx: number) => ({
             id: `step-${Date.now()}-${idx}`,
             instruction: stepStr,
@@ -285,24 +480,53 @@ export const Generator: React.FC = () => {
         };
       });
 
-      const happyCount = mappedTests.filter((t: any) => !t.title.toLowerCase().includes('error') && !t.title.toLowerCase().includes('fail')).length;
+      // Real taxonomy from the backend: every test case is tagged exactly
+      // "positive", "negative", or "edge_case" (see llm_service.py's
+      // BlueprintListSchema) — no fabricated "security exception" category.
+      const happyPaths = mappedTests.filter((t: any) => t.type === 'positive').length;
+      const edgeCases = mappedTests.filter((t: any) => t.type === 'edge_case').length;
+      const negativeFlows = mappedTests.filter((t: any) => t.type === 'negative').length;
+
       // Stamp this run's elapsed time once, here, and carry it inside the batch's own
       // metrics object — not a separate piece of shared state — so every batch keeps
       // its own true duration permanently, even after the next generation runs.
       const elapsedSec = Math.round((Date.now() - _genStart) / 1000);
+      const trace = responseData.generation_trace || null;
       const computedMetrics = {
-        coverageIndex: Math.floor(Math.random() * 3) + 96,
-        happyPaths: happyCount,
-        edgeCases: mappedTests.length - happyCount,
-        securityExceptions: Math.floor(Math.random() * 2) + 1,
+        happyPaths,
+        edgeCases,
+        negativeFlows,
         sourceFileName: sourceLabel.split(' + ')[0],
-        generationTime: elapsedSec
+        generationTime: elapsedSec,
+        generationTrace: trace,
       };
+
+      // Real trace log lines, built from the actual Gemini calls the backend
+      // made for this batch_label — model, tokens, and whether the Pass 1
+      // top-up retry fired — instead of fabricated "kernel telemetry" copy.
+      const traceLogs: GeneratorLog[] = [];
+      if (trace) {
+        traceLogs.push({
+          timestamp: new Date().toTimeString().split(' ')[0], type: 'step',
+          message: `Pass 1 (blueprint discovery) completed in ${trace.pass1_time_sec}s — ${trace.pass1_input_tokens + trace.topup_input_tokens} input / ${trace.pass1_output_tokens + trace.topup_output_tokens} output tokens.`
+        });
+        if (trace.topup_fired) {
+          traceLogs.push({
+            timestamp: new Date().toTimeString().split(' ')[0], type: 'warning',
+            message: 'Pass 1 returned fewer blueprints than requested — top-up retry call fired to fill the gap.'
+          });
+        }
+        traceLogs.push({
+          timestamp: new Date().toTimeString().split(' ')[0], type: 'step',
+          message: `Pass 2 (step expansion) completed in ${trace.pass2_time_sec}s across ${trace.pass2_call_count} Gemini call(s) — ${trace.pass2_input_tokens} input / ${trace.pass2_output_tokens} output tokens.`
+        });
+      }
 
       // Append success final lines safely
       const completedLogs: GeneratorLog[] = [
         ...initialLogs,
-        { timestamp: new Date().toTimeString().split(' ')[0], type: 'success', message: 'Extraction completed successfully. Injecting compiled structures into layout handlers.' }
+        ...traceLogs,
+        { timestamp: new Date().toTimeString().split(' ')[0], type: 'success', message: `Generation complete — ${mappedTests.length} test case(s) produced in ${elapsedSec}s.` }
       ];
       setGenerationElapsedSec(elapsedSec);
       setModalLogs(completedLogs);
@@ -470,9 +694,25 @@ export const Generator: React.FC = () => {
 
   return (
     <div className="generator-view" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', maxWidth: '1200px', margin: '0 auto', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
-      <div className="view-header">
-        <h1 style={{ fontSize: '1.75rem', fontWeight: 800, color: '#111827', letterSpacing: '-0.02em' }}>AI Test Design Studio</h1>
-        <p style={{ color: '#4b5563', marginTop: '0.25rem', fontSize: '0.95rem' }}>Generate scalable test packs from requirements while grounding outputs on specific application operational context parameters.</p>
+      <div className="view-header" style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '1rem' }}>
+        <div>
+          <h1 style={{ fontSize: '1.75rem', fontWeight: 800, color: '#111827', letterSpacing: '-0.02em' }}>AI Test Design Studio</h1>
+          <p style={{ color: '#4b5563', marginTop: '0.25rem', fontSize: '0.95rem' }}>Generate scalable test packs from requirements while grounding outputs on specific application operational context parameters.</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setShowCoverageModal(true)}
+          disabled={!activeAppId}
+          title={!activeAppId ? 'Select an application first' : 'View Coverage Index for this application'}
+          style={{
+            display: 'flex', alignItems: 'center', gap: '0.4rem', flexShrink: 0, marginTop: '0.2rem',
+            background: '#eef2ff', border: '1px solid #c7d2fe', color: '#4338ca', fontWeight: 700, fontSize: '0.85rem',
+            borderRadius: '8px', padding: '0.55rem 0.9rem', cursor: activeAppId ? 'pointer' : 'not-allowed',
+            opacity: activeAppId ? 1 : 0.5
+          }}
+        >
+          <Activity size={15} /> Coverage Index
+        </button>
       </div>
 
       <div className="glass-card" style={{ background: '#ffffff', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '1.5rem', boxShadow: '0 1px 3px rgba(0,0,0,0.02)' }}>
@@ -741,7 +981,7 @@ export const Generator: React.FC = () => {
                   <Cpu size={18} style={{ color: '#0284c7' }} />
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column' }}>
-                  <h2 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1e293b', margin: 0 }}>OmniTestAI Orchestration Framework Engine</h2>
+                  <h2 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1e293b', margin: 0 }}>OmniTestAI Generation Analytics</h2>
                   <span style={{ fontSize: '0.7rem', color: '#4f46e5', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', marginTop: '1px' }}>Active Batch: {activeBatchTitle}</span>
                 </div>
               </div>
@@ -750,108 +990,101 @@ export const Generator: React.FC = () => {
 
             <div style={{ padding: '1.5rem', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1.5rem', flex: 1, background: '#ffffff' }}>
 
-              <div style={{ background: '#05070a', padding: '1.25rem', borderRadius: '10px', border: '1px solid #1e293b', fontFamily: 'monospace', boxShadow: '0 4px 10px rgba(0,0,0,0.2)' }}>
-                <div style={{ borderBottom: '1px solid #111a2e', paddingBottom: '0.5rem', marginBottom: '0.75rem', display: 'flex', gap: '4px' }}>
-                   <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#ff5f56' }}></div>
-                   <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#ffbd2e' }}></div>
-                   <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#27c93f' }}></div>
-                   <span style={{ fontSize: '0.65rem', color: '#4b5563', marginLeft: '0.5rem', fontWeight: 700, letterSpacing: '0.05em' }}>KERNEL_STREAM_TELEMETRY</span>
-                </div>
-                <div style={{ minHeight: '100px', maxHeight: '130px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                  {modalLogs.map((log, index) => (
-                    <div key={index} style={{ color: log.type === 'success' ? '#4ade80' : log.type === 'warning' ? '#fbbf24' : '#38bdf8', fontSize: '0.8rem', lineHeight: '1.4' }}>
-                      <span style={{ color: '#475467' }}>[{log.timestamp}]</span> <span style={{ fontWeight: 'bold' }}>{log.type.toUpperCase()}:</span> <span>{log.message}</span>
+              <>
+                <div style={{ background: '#05070a', padding: '1.25rem', borderRadius: '10px', border: '1px solid #1e293b', fontFamily: 'monospace', boxShadow: '0 4px 10px rgba(0,0,0,0.2)' }}>
+                    <div style={{ borderBottom: '1px solid #111a2e', paddingBottom: '0.5rem', marginBottom: '0.75rem', display: 'flex', gap: '4px', alignItems: 'center' }}>
+                       <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#ff5f56' }}></div>
+                       <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#ffbd2e' }}></div>
+                       <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#27c93f' }}></div>
+                       <span style={{ fontSize: '0.65rem', color: '#4b5563', marginLeft: '0.5rem', fontWeight: 700, letterSpacing: '0.05em' }}>EXECUTION_LOG</span>
+                       {generationElapsedSec !== null && (
+                         <span style={{ marginLeft: 'auto', fontSize: '0.7rem', color: '#94a3b8', fontFamily: 'monospace' }}>⏱ {generationElapsedSec}s</span>
+                       )}
                     </div>
-                  ))}
-                  <div ref={consoleBottomRef} />
-                </div>
-              </div>
-
-              {activeBatchMetrics && (
-                <div style={{ display: 'grid', gridTemplateColumns: '1.1fr 2fr', gap: '1.5rem' }}>
-
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                    <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', padding: '1.25rem', borderRadius: '10px', display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                      <div style={{ background: '#ccfbf1', padding: '10px', borderRadius: '8px', color: '#0d9488' }}>
-                        <Activity size={22} />
-                      </div>
-                      <div>
-                        <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Coverage Index</span>
-                        <div style={{ fontSize: '1.75rem', fontWeight: 800, color: '#0f172a', marginTop: '2px', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-                          {activeBatchMetrics.coverageIndex}%
-                          <span style={{ fontSize: '0.7rem', fontWeight: 700, color: '#16a34a', background: '#dcfce7', padding: '1px 6px', borderRadius: '4px', marginLeft: '4px' }}>Optimal</span>
+                    <div style={{ minHeight: '100px', maxHeight: '160px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      {modalLogs.map((log, index) => (
+                        <div key={index} style={{ color: log.type === 'success' ? '#4ade80' : log.type === 'warning' ? '#fbbf24' : '#38bdf8', fontSize: '0.8rem', lineHeight: '1.4' }}>
+                          <span style={{ color: '#475467' }}>[{log.timestamp}]</span> <span style={{ fontWeight: 'bold' }}>{log.type.toUpperCase()}:</span> <span>{log.message}</span>
                         </div>
-                      </div>
-                    </div>
-
-                    <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', padding: '1.25rem', borderRadius: '10px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.75rem' }}>
-                        <Layers size={14} style={{ color: '#4f46e5' }} />
-                        <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Risk Distribution Profile</span>
-                      </div>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <span style={{ fontSize: '0.8rem', color: '#4b5563', fontWeight: 500 }}>Happy Path Flows</span>
-                          <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#15803d', background: '#dcfce7', padding: '2px 8px', borderRadius: '4px' }}>{activeBatchMetrics.happyPaths} Scenarios</span>
-                        </div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <span style={{ fontSize: '0.8rem', color: '#4b5563', fontWeight: 500 }}>Boundary Edge Cases</span>
-                          <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#b45309', background: '#fef3c7', padding: '2px 8px', borderRadius: '4px' }}>{activeBatchMetrics.edgeCases} Scenarios</span>
-                        </div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <span style={{ fontSize: '0.8rem', color: '#4b5563', fontWeight: 500 }}>Security Vulnerabilities</span>
-                          <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#b91c1c', background: '#fee2e2', padding: '2px 8px', borderRadius: '4px' }}>{activeBatchMetrics.securityExceptions} Exceptions</span>
-                        </div>
-                      </div>
-                    </div>
-                    {generationElapsedSec !== null && (
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '0.5rem', padding: '0.4rem 0.75rem', background: '#f1f5f9', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
-                        <span style={{ fontSize: '0.72rem', color: '#475569', fontWeight: 600, letterSpacing: '0.03em' }}>⏱ Generation Time</span>
-                        <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#000000', fontFamily: 'monospace' }}>{generationElapsedSec}s</span>
-                      </div>
-                    )}
-                  </div>
-
-                  <div style={{ background: '#020617', borderRadius: '12px', padding: '1.25rem', fontFamily: 'monospace', fontSize: '0.75rem', border: '1px solid #1e293b', display: 'flex', flexDirection: 'column' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1rem' }}>
-                      <span style={{ color: '#38bdf8', fontWeight: 700 }}>PROMPT SYNTHESIS TRACE</span>
-                      <span style={{ color: '#10b981', fontSize: '0.65rem', background: 'rgba(16,185,129,0.1)', padding: '2px 6px', borderRadius: '4px' }}>LLM_INJECT_READY</span>
-                    </div>
-
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', color: '#94a3b8', flex: 1 }}>
-                      <div>
-                        <div style={{ color: '#f8fafc', marginBottom: '0.2rem' }}>[01] SYSTEM_ROLE_CONFIG:</div>
-                        <div style={{ paddingLeft: '0.75rem', borderLeft: '1px solid #334155' }}>
-                          - Authority: Senior SDET Agent Optimizer<br />
-                          - Mode: Semantic Extraction Logic
-                        </div>
-                      </div>
-
-                      <div>
-                        <div style={{ color: '#f8fafc', marginBottom: '0.2rem' }}>[02] ACTIVE_GROUNDING_CONTEXT:</div>
-                        <div style={{ paddingLeft: '0.75rem', borderLeft: '1px solid #334155' }}>
-                          - Source: "{activeBatchMetrics.sourceFileName || 'User Stories.pdf'}"<br />
-                          - Token Density: High (Found Acceptance Criteria)
-                        </div>
-                      </div>
-
-                      <div>
-                        <div style={{ color: '#f8fafc', marginBottom: '0.2rem' }}>[03] DERIVED_INSTRUCTIONS:</div>
-                        <div style={{ paddingLeft: '0.75rem', borderLeft: '1px solid #334155', color: '#64748b' }}>
-                          1. Map user stories to functional assertions.<br />
-                          2. Inject boundary limits for detected data fields.<br />
-                          3. Filter grounding context for security vulnerabilities.
-                        </div>
-                      </div>
-
-                      <div style={{ marginTop: 'auto', padding: '0.6rem', background: 'rgba(30, 41, 59, 0.4)', borderRadius: '6px', color: '#38bdf8', lineHeight: '1.4' }}>
-                        <strong>AI_REASONING:</strong> Scenarios generated satisfy requirements in grounding source. {activeBatchMetrics.securityExceptions} security exception(s) flagged due to missing operational constraints.
-                      </div>
+                      ))}
+                      <div ref={consoleBottomRef} />
                     </div>
                   </div>
 
-                </div>
-              )}
+                  {activeBatchMetrics && (
+                    <div style={{ display: 'grid', gridTemplateColumns: '1.1fr 2fr', gap: '1.5rem' }}>
+
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                        <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', padding: '1.25rem', borderRadius: '10px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.75rem' }}>
+                            <Layers size={14} style={{ color: '#4f46e5' }} />
+                            <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Test Type Breakdown</span>
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <span style={{ fontSize: '0.8rem', color: '#4b5563', fontWeight: 500 }}>Happy Path (positive)</span>
+                              <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#15803d', background: '#dcfce7', padding: '2px 8px', borderRadius: '4px' }}>{activeBatchMetrics.happyPaths}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <span style={{ fontSize: '0.8rem', color: '#4b5563', fontWeight: 500 }}>Boundary / Edge Cases</span>
+                              <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#b45309', background: '#fef3c7', padding: '2px 8px', borderRadius: '4px' }}>{activeBatchMetrics.edgeCases}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <span style={{ fontSize: '0.8rem', color: '#4b5563', fontWeight: 500 }}>Negative / Error Flows</span>
+                              <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#b91c1c', background: '#fee2e2', padding: '2px 8px', borderRadius: '4px' }}>{activeBatchMetrics.negativeFlows}</span>
+                            </div>
+                          </div>
+                        </div>
+                        {generationElapsedSec !== null && (
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.4rem 0.75rem', background: '#f1f5f9', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                            <span style={{ fontSize: '0.72rem', color: '#475569', fontWeight: 600, letterSpacing: '0.03em' }}>⏱ Generation Time</span>
+                            <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#000000', fontFamily: 'monospace' }}>{generationElapsedSec}s</span>
+                          </div>
+                        )}
+                      </div>
+
+                      <div style={{ background: '#020617', borderRadius: '12px', padding: '1.25rem', fontFamily: 'monospace', fontSize: '0.75rem', border: '1px solid #1e293b', display: 'flex', flexDirection: 'column' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1rem' }}>
+                          <span style={{ color: '#38bdf8', fontWeight: 700 }}>GEMINI CALL TRACE</span>
+                          {activeBatchMetrics.generationTrace && (
+                            <span style={{ color: '#10b981', fontSize: '0.65rem', background: 'rgba(16,185,129,0.1)', padding: '2px 6px', borderRadius: '4px' }}>{activeBatchMetrics.generationTrace.model}</span>
+                          )}
+                        </div>
+
+                        {activeBatchMetrics.generationTrace ? (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', color: '#94a3b8', flex: 1 }}>
+                            <div>
+                              <div style={{ color: '#f8fafc', marginBottom: '0.2rem' }}>[01] PASS 1 — Blueprint Discovery:</div>
+                              <div style={{ paddingLeft: '0.75rem', borderLeft: '1px solid #334155' }}>
+                                - Time: {activeBatchMetrics.generationTrace.pass1_time_sec}s<br />
+                                - Tokens: {activeBatchMetrics.generationTrace.pass1_input_tokens} in / {activeBatchMetrics.generationTrace.pass1_output_tokens} out
+                                {activeBatchMetrics.generationTrace.topup_fired && (
+                                  <><br />- Top-up retry fired: +{activeBatchMetrics.generationTrace.topup_input_tokens} in / +{activeBatchMetrics.generationTrace.topup_output_tokens} out</>
+                                )}
+                              </div>
+                            </div>
+
+                            <div>
+                              <div style={{ color: '#f8fafc', marginBottom: '0.2rem' }}>[02] PASS 2 — Step Expansion:</div>
+                              <div style={{ paddingLeft: '0.75rem', borderLeft: '1px solid #334155' }}>
+                                - Time: {activeBatchMetrics.generationTrace.pass2_time_sec}s<br />
+                                - Calls: {activeBatchMetrics.generationTrace.pass2_call_count}<br />
+                                - Tokens: {activeBatchMetrics.generationTrace.pass2_input_tokens} in / {activeBatchMetrics.generationTrace.pass2_output_tokens} out
+                              </div>
+                            </div>
+
+                            <div style={{ marginTop: 'auto', padding: '0.6rem', background: 'rgba(30, 41, 59, 0.4)', borderRadius: '6px', color: '#38bdf8', lineHeight: '1.4' }}>
+                              <strong>TOTAL:</strong> {activeBatchMetrics.generationTrace.total_tokens} tokens across {activeBatchMetrics.generationTrace.total_time_sec}s.
+                            </div>
+                          </div>
+                        ) : (
+                          <div style={{ color: '#64748b' }}>No trace data available for this batch.</div>
+                        )}
+                      </div>
+
+                    </div>
+                  )}
+              </>
             </div>
 
             <div style={{ padding: '1rem 1.5rem', borderTop: '1px solid #edf2f7', background: '#f8fafc', display: 'flex', justifyContent: 'flex-end' }}>
@@ -861,6 +1094,41 @@ export const Generator: React.FC = () => {
                 </button>
               )}
               <button type="button" className="btn btn-secondary btn-small" onClick={() => setShowModal(false)} style={{ background: '#ffffff', border: '1px solid #d1d5db', color: '#374151', fontWeight: 600, borderRadius: '6px', height: '34px', padding: '0 1rem', cursor: 'pointer' }}>Close Analytics Dashboard</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showCoverageModal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(15, 23, 42, 0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: '1rem' }}>
+          <div className="glass-card" style={{ width: '100%', maxWidth: '820px', maxHeight: '88vh', display: 'flex', flexDirection: 'column', padding: 0, overflow: 'hidden', border: '1px solid #e2e8f0', background: '#ffffff', borderRadius: '16px', boxShadow: '0 20px 25px -5px rgba(0,0,0,0.05)' }}>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '1rem 1.25rem', borderBottom: '1px solid #edf2f7', background: '#f8fafc' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                <div style={{ background: '#eef2ff', padding: '6px', borderRadius: '6px', display: 'flex', alignItems: 'center' }}>
+                  <Activity size={18} style={{ color: '#4338ca' }} />
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <h2 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1e293b', margin: 0 }}>Coverage Index</h2>
+                  <span style={{ fontSize: '0.7rem', color: '#4f46e5', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', marginTop: '1px' }}>{activeApp?.name || 'No application selected'}</span>
+                </div>
+              </div>
+              <button type="button" style={{ background: '#ffffff', border: '1px solid #e2e8f0', color: '#64748b', cursor: 'pointer', padding: '6px', borderRadius: '50%' }} onClick={() => setShowCoverageModal(false)}><X size={16} /></button>
+            </div>
+
+            <div style={{ padding: '1.5rem', overflowY: 'auto', flex: 1, background: '#ffffff' }}>
+              <CoverageIndexPanel
+                loading={scoutLoading}
+                error={scoutError}
+                profile={scoutProfile}
+                pageLimitInput={scoutPageLimitInput}
+                setPageLimitInput={setScoutPageLimitInput}
+                onRescan={handleRescanApplication}
+              />
+            </div>
+
+            <div style={{ padding: '1rem 1.5rem', borderTop: '1px solid #edf2f7', background: '#f8fafc', display: 'flex', justifyContent: 'flex-end' }}>
+              <button type="button" className="btn btn-secondary btn-small" onClick={() => setShowCoverageModal(false)} style={{ background: '#ffffff', border: '1px solid #d1d5db', color: '#374151', fontWeight: 600, borderRadius: '6px', height: '34px', padding: '0 1rem', cursor: 'pointer' }}>Close</button>
             </div>
           </div>
         </div>

@@ -17,6 +17,7 @@ import app.routers.auth as auth
 from app.routers.token_usage import router as token_usage_router
 from app.routers import test_data
 from app.services.media_storage import MEDIA_ROOT
+from app.routers import scout
 
 app = FastAPI(
     title="OmniTestAI",
@@ -50,6 +51,7 @@ app.include_router(knowledge.router)
 app.include_router(dashboard.router)
 app.include_router(token_usage_router)
 app.include_router(test_data.router)
+app.include_router(scout.router)
 
 # Serve execution screenshots/videos as static files at /media/...
 app.mount("/media", StaticFiles(directory=MEDIA_ROOT), name="media")

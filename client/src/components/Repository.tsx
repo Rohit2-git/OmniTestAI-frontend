@@ -1,8 +1,9 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { useApp } from '../context/AppContext';
+import { apiService } from '../services/api';
 import type { TestCase, TestCaseStep } from '../types';
 import { 
-  Search, Folder, Plus, ChevronRight, Play, Trash2, X, FolderOpen
+  Search, Folder, Plus, ChevronRight, Play, Trash2, X, FolderOpen, Upload
 } from 'lucide-react';
 
 interface RepositoryProps {
@@ -11,7 +12,7 @@ interface RepositoryProps {
 }
 
 export const Repository: React.FC<RepositoryProps> = ({ setActiveTab, setSelectedTestIdsForRun }) => {
-  const { applications, testCases, activeAppId, addTestCase, updateTestCase, deleteTestCase } = useApp();
+  const { applications, testCases, activeAppId, addTestCase, updateTestCase, deleteTestCase, refreshTestCases } = useApp();
 
   const [activeFolder, setActiveFolder] = useState<string>('All Modules');
   const [searchQuery, setSearchQuery] = useState('');
@@ -19,6 +20,13 @@ export const Repository: React.FC<RepositoryProps> = ({ setActiveTab, setSelecte
   
   const [selectedTestCase, setSelectedTestCase] = useState<TestCase | null>(null);
   const [selectedTests, setSelectedTests] = useState<string[]>([]);
+  // The drawer is fixed-positioned and vertically centered in whatever part of
+  // the screen is currently visible, so it's always in frame the instant you
+  // click a row — no scrolling needed regardless of where in the list you
+  // clicked. We only need to track its horizontal position (drawerLeftPx),
+  // measured from the reserved column so it still lines up under the list.
+  const [drawerLeftPx, setDrawerLeftPx] = useState<number | null>(null);
+  const drawerColRef = useRef<HTMLDivElement>(null);
   const [editingTestId, setEditingTestId] = useState<string | null>(null);
   
   const [formTitle, setFormTitle] = useState('');
@@ -29,6 +37,8 @@ export const Repository: React.FC<RepositoryProps> = ({ setActiveTab, setSelecte
   const [formSteps, setFormSteps] = useState<Omit<TestCaseStep, 'id'>[]>([{ instruction: '', expected: '' }]);
 
   const addDialogRef = useRef<HTMLDialogElement>(null);
+  const csvInputRef = useRef<HTMLInputElement>(null);
+  const [isImporting, setIsImporting] = useState(false);
   const activeApp = applications.find(app => app.id === activeAppId);
   const appTestCases = testCases.filter(tc => tc.appId === activeAppId);
   const folders = ['All Modules', ...Array.from(new Set(appTestCases.map(tc => tc.section)))];
@@ -51,6 +61,24 @@ export const Repository: React.FC<RepositoryProps> = ({ setActiveTab, setSelecte
     e.stopPropagation();
     setSelectedTests(prev => prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]);
   };
+
+  // The drawer is fixed-positioned (so it's always vertically centered in the
+  // current viewport, never requiring a scroll to see the steps), which takes
+  // it out of the normal flex flow horizontally too — so we measure where its
+  // reserved column actually sits on screen and pin the drawer there. Re-runs
+  // whenever the drawer opens and on window resize, so it stays aligned even
+  // if the surrounding layout (app sidebar, folder panel) changes width.
+  useLayoutEffect(() => {
+    if (!selectedTestCase) return;
+    const measure = () => {
+      if (drawerColRef.current) {
+        setDrawerLeftPx(drawerColRef.current.getBoundingClientRect().left);
+      }
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [selectedTestCase]);
 
   const handleSelectAllToggle = () => {
     if (selectedTests.length === filteredTestCases.length) { setSelectedTests([]); } 
@@ -100,6 +128,60 @@ export const Repository: React.FC<RepositoryProps> = ({ setActiveTab, setSelecte
     }
   };
 
+  const handleImportCsvClick = () => {
+    csvInputRef.current?.click();
+  };
+
+  const handleCsvFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // reset so selecting the same file again still fires onChange
+    if (!file || !activeAppId) return;
+
+    setIsImporting(true);
+    try {
+      const result = await apiService.importTestCasesFromCsv(file, activeAppId);
+      const importedCases: any[] = result?.test_cases || [];
+      if (importedCases.length === 0) {
+        alert('No test cases were found in that CSV.');
+        return;
+      }
+      // Previously this only called addTestCase() below, which just appends
+      // to local React state — nothing was ever sent to the backend, so the
+      // imported cases lived only in memory and vanished on reload while
+      // AppContext's fetchFromDB() rebuilt testCases purely from real
+      // TestRun/TestResult rows in the DB. AI Test Design's "Save to Repo"
+      // avoids this by calling /tests/save (see Generator.tsx); CSV import
+      // needs the same treatment so it actually persists.
+      const payloadTestCases = importedCases.map((tc) => ({
+        title: tc.title || 'Untitled Test Case',
+        steps: Array.isArray(tc.steps) ? tc.steps : [],
+        expected_result: tc.expected_result || 'Success',
+        type: tc.type || 'functional',
+        test_data_source_type: tc.test_data_source_type ?? null,
+        test_data_source_id: tc.test_data_source_id ?? null,
+        test_data_values: tc.test_data_values ?? null,
+      }));
+
+      await apiService.saveTestCasesToRepo({
+        filename: file.name,
+        app_id: activeAppId,
+        test_cases: payloadTestCases,
+      });
+
+      // Refresh AppContext from the DB so the newly-saved cases show up
+      // immediately without needing a manual page reload. No addTestCase()
+      // call here — the DB is now the single source of truth for this
+      // batch, and adding locally too would just create a duplicate until
+      // the next fetchFromDB() pass caught up.
+      await refreshTestCases();
+      alert(`Imported ${importedCases.length} test case${importedCases.length === 1 ? '' : 's'} from ${file.name}.`);
+    } catch (err: any) {
+      alert(`CSV import failed: ${err?.message || err}`);
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
   return (
     <div className="repository-view">
       <div className="view-header-bar" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
@@ -108,9 +190,15 @@ export const Repository: React.FC<RepositoryProps> = ({ setActiveTab, setSelecte
           <p style={{ color: '#4b5563', marginTop: '0.25rem' }}>Author, maintain, and execute curated test cases for {activeApp?.name || 'your application'}.</p>
         </div>
         {activeAppId && (
-          <button type="button" className="btn btn-primary" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }} onClick={handleOpenAddModal}>
-            <Plus size={18} /> <span>Create Test Case</span>
-          </button>
+          <div style={{ display: 'flex', gap: '0.75rem' }}>
+            <input ref={csvInputRef} type="file" accept=".csv" style={{ display: 'none' }} onChange={handleCsvFileSelected} />
+            <button type="button" className="btn btn-secondary" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }} onClick={handleImportCsvClick} disabled={isImporting}>
+              <Upload size={18} /> <span>{isImporting ? 'Importing…' : 'Import CSV'}</span>
+            </button>
+            <button type="button" className="btn btn-primary" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }} onClick={handleOpenAddModal}>
+              <Plus size={18} /> <span>Create Test Case</span>
+            </button>
+          </div>
         )}
       </div>
 
@@ -177,7 +265,22 @@ export const Repository: React.FC<RepositoryProps> = ({ setActiveTab, setSelecte
           </div>
 
           {selectedTestCase && (
-            <div className="test-details-drawer" style={{ width: '460px', flexShrink: 0, background: 'white', border: '1px solid #e5e7eb', padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.5rem', borderRadius: '12px', boxShadow: '0 4px 15px rgba(0,0,0,0.04)', position: 'sticky', top: '1.5rem', maxHeight: 'calc(100vh - 180px)' }}>
+            // Outer wrapper stays a normal flex sibling reserving the same
+            // 460px column width the drawer always used — this is what keeps
+            // the test list from reflowing/jumping when the drawer opens or
+            // closes. The drawer itself is fixed-positioned and vertically
+            // centered in the CURRENT viewport (not anchored to document
+            // flow), so it's always fully in frame the moment you click a
+            // row — no scrolling required, regardless of where in the list
+            // you clicked or how far down the page you'd scrolled.
+            <div ref={drawerColRef} style={{ width: '460px', flexShrink: 0, position: 'relative' }}>
+              <div className="test-details-drawer" style={{
+                width: '460px', background: 'white', border: '1px solid #e5e7eb', padding: '1.5rem',
+                display: 'flex', flexDirection: 'column', gap: '1.5rem', borderRadius: '12px',
+                boxShadow: '0 10px 30px rgba(0,0,0,0.12)', position: 'fixed', top: '50%',
+                left: drawerLeftPx !== null ? `${drawerLeftPx}px` : undefined,
+                transform: 'translateY(-50%)', maxHeight: '85vh', zIndex: 50,
+              }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '1px solid #f3f4f6', paddingBottom: '1rem' }}>
                 <div style={{ maxWidth: '85%' }}>
                   <h3 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#111827', lineHeight: '1.3' }}>{selectedTestCase.title}</h3>
@@ -203,6 +306,7 @@ export const Repository: React.FC<RepositoryProps> = ({ setActiveTab, setSelecte
                 <button type="button" className="btn btn-secondary" style={{ flex: 1, height: '38px' }} onClick={() => handleOpenEditModal(selectedTestCase)}>Edit</button>
                 <button type="button" className="btn btn-danger" style={{ flex: 1, height: '38px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem' }} onClick={() => { deleteTestCase(selectedTestCase.id); setSelectedTestCase(null); }}><Trash2 size={14} /> Delete</button>
                 <button type="button" className="btn btn-accent" style={{ flex: 1.5, height: '38px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem' }} onClick={() => { setSelectedTestIdsForRun([selectedTestCase.id]); setActiveTab('executor'); }}><Play size={14} /> Execute</button>
+              </div>
               </div>
             </div>
           )}

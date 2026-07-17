@@ -88,6 +88,66 @@ export const apiService = {
   },
 
   /**
+   * Uploads a manually-written CSV of test cases. The backend groups rows into
+   * test cases, keeps already-atomic steps as-is (zero AI cost), and runs an
+   * AI normalization pass only on steps that read as high-level descriptions —
+   * returning the same shape as generateTestPack's response.
+   */
+  importTestCasesFromCsv: async (file: File, appId?: string): Promise<any> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (appId) formData.append('app_id', appId);
+
+    const response = await fetch(`${BASE_URL}/tests/import-csv`, {
+      method: 'POST',
+      body: formData,
+      credentials: 'include',
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `CSV import failed: ${response.status}`);
+    }
+    return response.json();
+  },
+
+  /**
+   * Fetches the cached Coverage Index scout profile for an app — the backend
+   * runs a fresh Playwright discovery crawl only if none exists yet for this
+   * app_id; otherwise returns the cached result plus a live generated-count
+   * comparison. GET, so no body — just credentials for auth.
+   */
+  getScoutProfile: async (appId: string): Promise<any> => {
+    const response = await fetch(`${BASE_URL}/apps/${appId}/scout`, {
+      method: 'GET',
+      credentials: 'include',
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `Failed to load coverage data: ${response.status}`);
+    }
+    return response.json();
+  },
+
+  /**
+   * Forces a fresh Playwright crawl of the app, optionally updating the
+   * stored crawl page-limit config in the same call.
+   */
+  refreshScoutProfile: async (appId: string, pageLimit?: number): Promise<any> => {
+    const response = await fetch(`${BASE_URL}/apps/${appId}/scout/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ page_limit: pageLimit }),
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `Re-scan failed: ${response.status}`);
+    }
+    return response.json();
+  },
+
+  /**
    * Persists a reviewed generation batch to the repository.
    * Requires auth — the backend stamps createdByUserId/createdByRole/visibility
    * from the session cookie, so credentials must be included.
